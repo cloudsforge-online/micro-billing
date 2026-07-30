@@ -1,0 +1,271 @@
+/**
+ * The ledger, over HTTP.
+ *
+ * **Billing holds no balance.** Every movement of value a purchase, a subscription charge or a
+ * refund causes is a balanced journal entry posted to the ledger through this client, with an
+ * idempotency key. Nothing in this repository decrements a column.
+ *
+ * That is the whole difference from what is being superseded. `repos/forge-pay` records a sale and
+ * decrements `wallets.shards` in the same service, in the same transaction, against a running
+ * column that IS the truth — so nothing can check that the sale and the money agree, and a coin
+ * deposit writes no ledger row at all. Here the money is somebody else's job, the entry is
+ * double-entry and balanced by a deferred constraint trigger, and the purchase row carries the
+ * entry id that paid for it.
+ *
+ * Two things this file is careful about:
+ *
+ *   1. **Amounts cross the wire as strings.** A JSON number is an IEEE 754 double and the ledger
+ *      refuses one that is not already a safe integer. Sending `amount.toString()` means the value
+ *      the ledger stores is exactly the value computed here.
+ *   2. **A 4xx from the ledger is the ledger deciding.** Insufficient funds is not a fault to
+ *      retry, it is an answer — and it must reach the user as "you cannot afford this", not as a
+ *      500. `@cloudsforge/http` already declines to retry a peer-decided status; this file maps it
+ *      onto a domain error so the route does not have to know what a status code is.
+ */
+
+import { HttpClient, HttpError } from '@cloudsforge/http'
+import type { AccountPurpose, AccountType, EntryKind, EntryMetadata, LedgerAssetCode } from '@cloudsforge/contracts-money'
+
+/** The account an entry names, in the shape the ledger's `POST /entries` accepts. */
+export interface LedgerAccount {
+  readonly subject: string
+  readonly assetCode: LedgerAssetCode
+  readonly purpose: AccountPurpose
+  readonly type: AccountType
+}
+
+export interface LedgerPosting {
+  readonly account: LedgerAccount
+  readonly direction: 'debit' | 'credit'
+  readonly amount: bigint
+  readonly assetCode: LedgerAssetCode
+  readonly sequence: number
+}
+
+export interface PostEntryRequest {
+  readonly kind: EntryKind
+  readonly actor: string
+  readonly correlationId: string
+  readonly idempotencyKey: string
+  readonly description?: string
+  readonly metadata?: EntryMetadata
+  readonly postings: readonly LedgerPosting[]
+}
+
+export interface ReverseEntryRequest {
+  readonly actor: string
+  readonly correlationId: string
+  readonly idempotencyKey: string
+  readonly description?: string
+  readonly metadata?: EntryMetadata
+}
+
+export interface PostedEntry {
+  readonly id: string
+  /** True when the ledger answered from a stored idempotent response rather than by posting. */
+  readonly replayed: boolean
+}
+
+/** The port the domain sees. An interface, so a test needs no running ledger. */
+export interface LedgerClient {
+  postEntry(request: PostEntryRequest): Promise<PostedEntry>
+  reverseEntry(entryId: string, request: ReverseEntryRequest): Promise<PostedEntry>
+}
+
+/** The subject could not pay. A decision, not a fault: 402 to the caller, never a retry. */
+export class InsufficientFundsError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'InsufficientFundsError'
+  }
+}
+
+/** The ledger refused the entry for a reason that will not change on a retry. */
+export class LedgerRejectedError extends Error {
+  readonly status: number
+  readonly code: string
+  constructor(status: number, code: string, message: string) {
+    super(message)
+    this.name = 'LedgerRejectedError'
+    this.status = status
+    this.code = code
+  }
+}
+
+/**
+ * The ledger is unreachable or answered 5xx.
+ *
+ * Distinct from a rejection because the correct response is different: **we do not know whether
+ * the entry posted.** The purchase transaction rolls back, so no entitlement is granted, and the
+ * caller's retry carries the same idempotency key — which is what makes the unknown safe.
+ */
+export class LedgerUnavailableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'LedgerUnavailableError'
+  }
+}
+
+export interface LedgerClientOptions {
+  readonly baseUrl: string
+  /** Async, so a ten-minute service token can be refreshed without rebuilding the client. */
+  readonly token: () => Promise<string | undefined> | string | undefined
+  readonly deadlineMs: number
+  readonly originatingService: string
+  readonly fetch?: typeof globalThis.fetch
+}
+
+interface EntryResponse {
+  readonly entry?: { readonly id?: string }
+  readonly replayed?: boolean
+}
+
+interface LedgerErrorBody {
+  readonly error?: { readonly code?: string; readonly message?: string }
+}
+
+export function httpLedgerClient(options: LedgerClientOptions): LedgerClient {
+  const client = new HttpClient({
+    baseUrl: options.baseUrl,
+    name: 'ledger',
+    defaultDeadlineMs: options.deadlineMs,
+    token: options.token,
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+  })
+
+  const post = async (path: string, body: unknown, idempotencyKey: string): Promise<PostedEntry> => {
+    let response: EntryResponse
+    try {
+      response = await client.post<EntryResponse>(path, body, {
+        // The key is what makes this POST retriable at all. Without it `@cloudsforge/http`
+        // attempts a non-idempotent method exactly once, deliberately — retrying a POST that
+        // debits a wallet is how a user gets charged twice.
+        idempotencyKey,
+        deadlineMs: options.deadlineMs,
+      })
+    } catch (err) {
+      throw translate(err)
+    }
+    const id = response.entry?.id
+    if (typeof id !== 'string' || id.length === 0) {
+      throw new LedgerUnavailableError('the ledger accepted the entry but returned no entry id')
+    }
+    return { id, replayed: response.replayed === true }
+  }
+
+  return {
+    postEntry: (request) =>
+      post(
+        '/entries',
+        {
+          kind: request.kind,
+          originatingService: options.originatingService,
+          actor: request.actor,
+          correlationId: request.correlationId,
+          idempotencyKey: request.idempotencyKey,
+          ...(request.description !== undefined ? { description: request.description } : {}),
+          ...(request.metadata !== undefined ? { metadata: request.metadata } : {}),
+          postings: request.postings.map((posting) => ({
+            account: posting.account,
+            direction: posting.direction,
+            // A string, always. The ledger accepts a JSON number only when it is already a safe
+            // integer, and an amount that lost precision before it was serialised is not the
+            // amount anybody intended.
+            amount: posting.amount.toString(),
+            assetCode: posting.assetCode,
+            sequence: posting.sequence,
+          })),
+        },
+        request.idempotencyKey,
+      ),
+
+    reverseEntry: (entryId, request) =>
+      post(
+        `/entries/${encodeURIComponent(entryId)}/reverse`,
+        {
+          originatingService: options.originatingService,
+          actor: request.actor,
+          correlationId: request.correlationId,
+          idempotencyKey: request.idempotencyKey,
+          ...(request.description !== undefined ? { description: request.description } : {}),
+          ...(request.metadata !== undefined ? { metadata: request.metadata } : {}),
+        },
+        request.idempotencyKey,
+      ),
+  }
+}
+
+/**
+ * Map a transport failure onto a domain error.
+ *
+ * The distinction that matters is "the ledger decided" against "we do not know". Only the second
+ * is worth retrying, and only the first should ever reach a user as an explanation.
+ */
+export function translate(err: unknown): Error {
+  if (err instanceof HttpError) {
+    const body = parseBody(err.body)
+    const code = body.error?.code ?? 'ledger_error'
+    const message = body.error?.message ?? err.message
+    if (err.peerDecided) {
+      if (code === 'insufficient_funds') return new InsufficientFundsError(message)
+      return new LedgerRejectedError(err.status, code, message)
+    }
+    return new LedgerUnavailableError(message)
+  }
+  return new LedgerUnavailableError(err instanceof Error ? err.message : String(err))
+}
+
+function parseBody(text: string): LedgerErrorBody {
+  try {
+    return JSON.parse(text) as LedgerErrorBody
+  } catch {
+    return {}
+  }
+}
+
+/* ------------------------------------------------------------------------ posting shapes */
+
+/**
+ * What a purchase looks like as double entry: the subject's spendable liability falls, platform
+ * revenue rises.
+ *
+ * Both sides are named rather than one, because that is the point of a journal: the estate's
+ * single-sided `ledger.delta` column can express "the user lost 500" and cannot express where it
+ * went, so per-product revenue is not derivable from it at all.
+ *
+ * Directions follow `normalBalance` in contracts-money: a liability is credit-normal, so debiting
+ * the user's available account reduces what we owe them; revenue is credit-normal, so crediting
+ * platform fees increases it. The entry balances because it is the same number.
+ */
+export function purchasePostings(input: {
+  readonly subject: string
+  readonly assetCode: LedgerAssetCode
+  readonly amount: bigint
+}): readonly LedgerPosting[] {
+  return [
+    {
+      account: {
+        subject: input.subject,
+        assetCode: input.assetCode,
+        purpose: 'available',
+        type: 'liability',
+      },
+      direction: 'debit',
+      amount: input.amount,
+      assetCode: input.assetCode,
+      sequence: 0,
+    },
+    {
+      account: {
+        subject: 'platform',
+        assetCode: input.assetCode,
+        purpose: 'fees',
+        type: 'revenue',
+      },
+      direction: 'credit',
+      amount: input.amount,
+      assetCode: input.assetCode,
+      sequence: 1,
+    },
+  ]
+}
