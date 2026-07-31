@@ -6,3 +6,4 @@ dist
 *.log
 src/**/*.test.ts
 src/testsupport.ts
+.env.*
