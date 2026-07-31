@@ -45,6 +45,17 @@ beforeEach(async () => {
 
 const AT = '2026-07-30T12:00:00.000Z'
 
+/**
+ * The default grant instant, and it is FIXTURE time, not the database's clock. Every activity
+ * question in this file is asked at an instant on the fixture timeline (AT and its neighbours),
+ * so a grant must land on that same timeline. Letting granted_at default to the database's now()
+ * worked only while the wall clock was still before AT: the day after AT passed, every default
+ * grant was created "after" the instant the assertions ask about — 0 rows listed where 1 was
+ * expected — and the expiry fixtures started violating entitlements_expiry_after_grant outright,
+ * because now() had overtaken them. A test timeline must be closed under the clock it uses.
+ */
+const GRANTED = new Date('2026-07-30T08:00:00.000Z')
+
 async function productId(sku: string): Promise<string> {
   const rows = await sql<Array<{ id: string }>>`select id from products where sku = ${sku}`
   return rows[0]!.id
@@ -71,7 +82,7 @@ async function grant(input: {
       scope: input.scope ?? 'platform',
       source: 'purchase',
       quantity: input.quantity ?? 1n,
-      ...(input.grantedAt !== undefined ? { grantedAt: input.grantedAt } : {}),
+      grantedAt: input.grantedAt ?? GRANTED,
       expiresAt: input.expiresAt ?? null,
       journalEntryId: input.journalEntryId ?? 'entry-000001',
       actor: 'user:test',
