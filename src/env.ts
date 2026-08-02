@@ -127,6 +127,29 @@ export interface Env {
   readonly purchaseAsset: LedgerAssetCode
   /** How long an idempotency key is honoured. Must outlive every caller's retry horizon. */
   readonly idempotencyTtlDays: number
+  /**
+   * Where micro-admin-api is, for the fee-recycle percentage — docs/ecosystem/21 §3.
+   *
+   * **`null` is a supported mode and means something true**: this deployment runs no engagement
+   * programme, so no share of fee revenue is recycled into the treasury. The recycle job still
+   * runs and still finishes any period the ledger already owes an answer about; it closes no new
+   * ones. That is the notify-SMTP discipline — unconfigured is a state, not a fault — and it is
+   * also the honest reading, because the rate itself lives in admin-api and a deployment without
+   * one has nobody to ask.
+   *
+   * Note what is NOT here: a `BILLING_FEE_RECYCLE_BPS`. The percentage is an approval-gated
+   * operator decision (21 §6) and a copy of it in this repository would be a second thing to
+   * raise, bypassing the gate.
+   */
+  readonly adminApiBaseUrl: string | null
+  /**
+   * The service token billing presents to admin-api, carrying the exact scope `admin:read`.
+   *
+   * Required only when `ADMIN_API_URL` is set — a URL with no token is a configuration that
+   * cannot work, and failing at boot beats failing hourly in a job nobody is watching.
+   */
+  readonly adminApiToken: string | null
+  readonly adminApiDeadlineMs: number
 }
 
 const LEVELS = new Set(['debug', 'info', 'warn', 'error'])
@@ -146,6 +169,16 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     throw new EnvError(`BILLING_LEDGER_URL must be an absolute http(s) URL (got ${ledgerBaseUrl})`)
   }
 
+  // Optional as a pair. Set neither (no engagement programme here) or set both — a URL with no
+  // token would boot happily and then fail every hour inside a job, which is the failure mode
+  // this file exists to convert into a refusal at startup naming the variable.
+  const adminApiRaw = source['ADMIN_API_URL']?.trim()
+  const adminApiBaseUrl = adminApiRaw && adminApiRaw.length > 0 ? adminApiRaw : null
+  if (adminApiBaseUrl !== null && !/^https?:\/\//i.test(adminApiBaseUrl)) {
+    throw new EnvError(`ADMIN_API_URL must be an absolute http(s) URL (got ${adminApiBaseUrl})`)
+  }
+  const adminApiToken = adminApiBaseUrl === null ? null : requiredSecret(source, 'BILLING_ADMIN_API_TOKEN')
+
   return {
     port: integer(source, 'PORT', 4000, 1, 65_535),
     env: optional(source, 'NODE_ENV', 'development'),
@@ -164,6 +197,9 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     ledgerDeadlineMs: integer(source, 'BILLING_LEDGER_DEADLINE_MS', 5_000, 250, 30_000),
     purchaseAsset: 'SHARD',
     idempotencyTtlDays: integer(source, 'BILLING_IDEMPOTENCY_TTL_DAYS', 30, 1, 3_650),
+    adminApiBaseUrl,
+    adminApiToken,
+    adminApiDeadlineMs: integer(source, 'BILLING_ADMIN_API_DEADLINE_MS', 5_000, 250, 30_000),
   }
 }
 

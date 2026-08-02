@@ -60,9 +60,49 @@ test('every table the service reads or writes is created', () => {
     'invoices',
     'invoice_lines',
     'payouts',
+    'engagement_fee_recycles',
   ]) {
     assert.match(sql, new RegExp(`create table if not exists ${table}\\b`), `${table} is missing`)
   }
+})
+
+test('the fee recycle carries its ceiling in the schema — 21 §7.5', () => {
+  // The ceiling is the one guarantee that cannot live in a client: admin-api owns the percentage
+  // and billing reads it, so the only thing stopping a bad read, a bypassed client or a psql
+  // session from recycling 90% of revenue is this CHECK. 2500 bps is the same number as
+  // admin-api's `engagement_fee_recycle_within_ceiling` (admin-api/src/migrations.ts:451), and
+  // `recycle.test.ts` proves it against the live constraint.
+  assert.match(statementsOf(sql), /engagement_fee_recycles_within_ceiling/)
+  assert.match(statementsOf(sql), /check \(recycle_bps >= 0 and recycle_bps <= 2500\)/)
+})
+
+test('the recycled amount is the DATABASE’s arithmetic, and it floors', () => {
+  // A generated column, so a handler cannot compute a different number from the one the row
+  // claims. `div` truncates and both operands are non-negative, so the recycle is always at most
+  // the configured share — the safe direction for a transfer out of revenue.
+  assert.match(statementsOf(sql), /amount_shards\s+numeric\(78, 0\)\s+generated always as/)
+  assert.match(statementsOf(sql), /div\(greatest\(gross_shards - refunded_shards, 0::numeric\) \* recycle_bps, 10000::numeric\)/)
+})
+
+test('a recycle names its entry exactly when it posted one — 21 §7.4', () => {
+  // Both directions in one constraint: no entry id without a posting, no posting without one.
+  assert.match(statementsOf(sql), /engagement_fee_recycles_posted_names_entry/)
+  assert.match(statementsOf(sql), /check \(\(status = 'posted'\) = \(journal_entry_id is not null\)\)/)
+})
+
+test('one recycle row per period per asset, so a crashed run resumes rather than doubles', () => {
+  assert.match(
+    statementsOf(sql),
+    /create unique index if not exists engagement_fee_recycles_period_uniq\s+on engagement_fee_recycles \(asset_code, period_start\)/,
+  )
+})
+
+test('billing declares no fee-recycle PERCENTAGE of its own', () => {
+  // 21 §6 makes the rate an approval-gated operator decision in admin-api. A default, a column or
+  // a settings row here would be a second thing to raise, bypassing the two-operator gate — so
+  // the schema holds periods and a ceiling, and never a rate anybody can set from this side.
+  assert.doesNotMatch(statementsOf(sql), /recycle_bps\s+integer\s+not null\s+default/)
+  assert.doesNotMatch(statementsOf(sql), /create table if not exists engagement_fee_recycle\b/)
 })
 
 /* ------------------------------------------------------------------ the four defects */

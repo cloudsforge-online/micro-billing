@@ -42,6 +42,7 @@ export const skip = enabled ? false : 'set BILLING_TEST_DATABASE_URL (name must 
 
 /** Every table this service owns. Order does not matter because CASCADE is used. */
 const ALL_TABLES = [
+  'engagement_fee_recycles',
   'invoice_lines',
   'invoices',
   'usage_records',

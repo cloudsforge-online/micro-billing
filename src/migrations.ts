@@ -421,6 +421,122 @@ export const MIGRATIONS: readonly Migration[] = [
       on conflict do nothing;
     `,
   },
+
+  {
+    version: 10,
+    name: 'engagement_fee_recycle',
+    up: `
+      -- ════════════════════════════════════════════════════════════════════════════════════════
+      -- THE FEE RECYCLE — docs/ecosystem/21 §3, second funding leg.
+      --
+      -- "A configured percentage of platform fee revenue (billing) posts to the same treasury
+      -- account each period, so the engagement budget eventually funds itself from the activity
+      -- it seeded. The percentage is an admin-set value with a schema-capped ceiling."
+      --
+      -- One row per closed period per asset. The row is written BEFORE any money is asked to
+      -- move and carries every number the entry is derived from, so "what did the platform
+      -- recycle, out of what, at what rate" is a select rather than a reconstruction.
+      --
+      -- ── THE PERCENTAGE IS NOT CONFIGURED HERE, AND THAT IS THE POINT ────────────────────────
+      --
+      -- micro-admin-api owns it: 'engagement_fee_recycle.recycle_bps', one platform-wide row,
+      -- raise-gated by two operators through 'engagement.policy.set' and capped at 2500 bps by
+      -- 'engagement_fee_recycle_within_ceiling' (admin-api/src/migrations.ts:451). Billing READS
+      -- it per run and RECORDS what it applied. There is no second copy to drift out of step,
+      -- which is why this table has no settings row of its own.
+      --
+      -- What this schema adds is the half a read cannot give: the CEILING, restated as a CHECK
+      -- with the identical number. Two things then hold that neither side holds alone —
+      --
+      --   1. Billing cannot exceed what admin-api permits even if the read is wrong, the client
+      --      is bypassed, or somebody writes this table by hand from psql.
+      --   2. The two cannot disagree in the direction that matters. If admin-api's ceiling were
+      --      ever raised past 2500 without this constraint being raised with it, the FIRST
+      --      period at the higher rate is refused here — loudly, at the constraint — rather than
+      --      recycling silently at a percentage this repository was never told about. The client
+      --      also compares admin-api's published ceiling against this number before it applies
+      --      anything, so the mismatch is reported before the row is even attempted.
+      --
+      -- ── THE AMOUNT IS THE DATABASE'S ARITHMETIC, NOT A HANDLER'S ────────────────────────────
+      --
+      -- 'amount_shards' is GENERATED. A handler that computed it could be wrong, could be
+      -- changed, and could disagree with the row it wrote it on; a generated column cannot. The
+      -- expression floors (div() truncates, and both operands are non-negative), so a recycle is
+      -- always at most the configured share and never a Shard over it — the safe direction for a
+      -- transfer out of revenue.
+      --
+      -- The net basis is 'greatest(gross - refunded, 0)'. A period whose refunds exceed its
+      -- takings recycles nothing rather than moving money OUT of the treasury: reversing an
+      -- engagement transfer is an operator decision with an approval behind it, not something a
+      -- background job does because a big refund landed on a quiet day. The expression is
+      -- repeated in the amount rather than referenced through a second generated column, which
+      -- Postgres does not allow.
+      -- ════════════════════════════════════════════════════════════════════════════════════════
+      create table if not exists engagement_fee_recycles (
+        id           uuid not null primary key default gen_random_uuid(),
+        asset_code   text not null,
+        -- Half-open [start, end). The job only ever closes periods that have fully elapsed.
+        period_start timestamptz not null,
+        period_end   timestamptz not null,
+
+        -- Platform fee revenue billing RECOGNISED in this period: purchases (which includes the
+        -- first charge of a subscription) plus renewal invoices. Both credit
+        -- (platform, <asset>, fees) through 'purchasePostings' — src/ledger.ts:262.
+        gross_shards    numeric(78, 0) not null check (gross_shards >= 0),
+        -- Refunds that landed in this period, whichever period the purchase was made in. Each
+        -- one reversed its entry and debited that same revenue account back.
+        refunded_shards numeric(78, 0) not null check (refunded_shards >= 0),
+
+        -- What admin-api's policy said when this period was closed. Recorded, never configured.
+        recycle_bps integer not null,
+
+        amount_shards numeric(78, 0)
+          generated always as (
+            div(greatest(gross_shards - refunded_shards, 0::numeric) * recycle_bps, 10000::numeric)
+          ) stored,
+
+        -- 'pending' — the row is claimed and the entry has not been confirmed posted.
+        -- 'posted'  — the ledger holds it, under the key derived from this period.
+        -- 'skipped' — there was nothing to move. At 0 bps every period is one of these, and
+        --             that is the recorded starting state (21's closing open decision).
+        status text not null default 'pending' check (status in ('pending', 'posted', 'skipped')),
+        journal_entry_id text,
+
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now(),
+
+        constraint engagement_fee_recycles_period_ordered check (period_end > period_start),
+
+        -- THE CEILING. The same 2500 as admin-api's 'engagement_fee_recycle_within_ceiling'
+        -- (admin-api/src/migrations.ts:451). 21 §7.5 requires the fee-recycle percentage to be
+        -- unable to exceed its schema ceiling; this is that requirement on billing's side of the
+        -- wire, where the money is actually computed.
+        constraint engagement_fee_recycles_within_ceiling
+          check (recycle_bps >= 0 and recycle_bps <= 2500),
+
+        -- 21 §7.4's pairing, for this leg: a posted recycle names its entry and an unposted one
+        -- names none. Both halves, so neither an entry id without a posting nor a posting
+        -- without an entry id can exist.
+        constraint engagement_fee_recycles_posted_names_entry
+          check ((status = 'posted') = (journal_entry_id is not null)),
+
+        -- A skipped period moved nothing, so it cannot be a period with money in it. Without
+        -- this, a bug that skipped a fundable period would look exactly like a quiet day.
+        constraint engagement_fee_recycles_skipped_moves_nothing
+          check (status <> 'skipped' or amount_shards = 0)
+      );
+
+      -- One row per period per asset, for ever. This is what makes a crashed run resumable
+      -- rather than doubling: the second attempt loses the insert and adopts the row it finds.
+      create unique index if not exists engagement_fee_recycles_period_uniq
+        on engagement_fee_recycles (asset_code, period_start);
+
+      -- The resume path's access path: rows the job still owes the ledger an answer about.
+      create index if not exists engagement_fee_recycles_pending_idx
+        on engagement_fee_recycles (period_start)
+        where status = 'pending';
+    `,
+  },
 ]
 
 /**

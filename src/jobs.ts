@@ -30,6 +30,16 @@
  *   |                       |                     | is pure waste against the same index.         |
  *   | billing.idempotency.  | `global`            | Nothing, but two long DELETEs compete for the |
  *   |   reap                |                     | row locks at the head of every purchase.      |
+ *   | billing.engagement.   | `global`            | Nothing that survives, because the unique     |
+ *   |   recycle             |                     | index on (asset, period) and the period-      |
+ *   |                       |                     | derived idempotency key each refuse the       |
+ *   |                       |                     | double — but two runs would both call the     |
+ *   |                       |                     | ledger for one period, and one of them would  |
+ *   |                       |                     | be told 'replayed' for money it did not move. |
+ *   |                       |                     | Keying on the PERIOD instead would let a run  |
+ *   |                       |                     | that is behind close several days in          |
+ *   |                       |                     | parallel, which is exactly the ordering the   |
+ *   |                       |                     | contiguity rule in `recycle.ts` depends on.   |
  */
 
 import { JobRunner, type JobQueue, type RunnerEvent } from '@cloudsforge/jobs'
@@ -43,12 +53,15 @@ import { purchasePostings, InsufficientFundsError, type LedgerClient } from './l
 import { advancePeriod, dueForRenewal, markPastDue, readSubscription } from './subscriptions.ts'
 import { nextPeriodEnd, resolveTarget } from './catalogue.ts'
 import { createInvoice } from './revenue.ts'
+import { runRecycle, type RecycleDeps } from './recycle.ts'
+import type { EngagementPolicyClient } from './adminapi.ts'
 
 export const RELAY_KIND = 'outbox.relay'
 export const EXPIRE_KIND = 'billing.entitlement.expire'
 export const RENEW_KIND = 'billing.subscription.renew'
 export const RENEWAL_SCAN_KIND = 'billing.renewals.scan'
 export const REAP_KIND = 'billing.idempotency.reap'
+export const RECYCLE_KIND = 'billing.engagement.recycle'
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -62,6 +75,15 @@ export interface JobDeps {
   readonly assetCode: LedgerAssetCode
   readonly signingSecret: string
   readonly idempotencyTtlDays: number
+  /**
+   * micro-admin-api, for the fee-recycle percentage — 21 §3.
+   *
+   * Optional on purpose. `ADMIN_API_URL` unset means this deployment runs no engagement
+   * programme, which is a supported mode and a true statement rather than a misconfiguration.
+   * The recurring job still runs and still finishes any period the ledger already owes an
+   * answer about; it just closes no new ones.
+   */
+  readonly adminApi?: EngagementPolicyClient | undefined
 }
 
 export interface RecurringJob {
@@ -85,6 +107,12 @@ export const RECURRING: readonly RecurringJob[] = Object.freeze([
   { kind: EXPIRE_KIND, key: 'global', everyMs: MINUTE },
   { kind: RENEWAL_SCAN_KIND, key: 'global', everyMs: 5 * MINUTE },
   { kind: REAP_KIND, key: 'global', everyMs: 24 * HOUR },
+  // Hourly, for a job that closes whole UTC days. Not daily: an hourly cadence means a period
+  // that could not be closed — admin-api unreachable, the ledger's answer lost — is retried
+  // within the hour rather than tomorrow, and the cost of a run with nothing to do is two
+  // indexed selects. It also makes the FIRST run after a deploy happen within the hour, which is
+  // when a misconfigured token gets found.
+  { kind: RECYCLE_KIND, key: 'global', everyMs: HOUR },
 ])
 
 /** Enqueue the recurring set at boot. `keep` means N replicas booting together produce one row. */
@@ -189,6 +217,31 @@ export function registerHandlers(runner: JobRunner, deps: JobDeps): JobRunner {
     const removed = await reapIdempotencyKeys(deps.sql, deps.idempotencyTtlDays)
     if (removed > 0) {
       deps.logger.info('reaped idempotency keys', { removed, ttlDays: deps.idempotencyTtlDays })
+    }
+  })
+
+  /**
+   * Recycle a share of platform fee revenue into the engagement treasury — 21 §3.
+   *
+   * The whole decision procedure is in `recycle.ts`, including why an unreadable rate closes
+   * nothing and why an unknown ledger outcome leaves the row pending. What belongs here is the
+   * one thing a job handler owes its runner: `runRecycle` returns for every expected refusal and
+   * throws only for the genuinely unknown, so a throw out of this handler means "retry with
+   * backoff" and nothing else does.
+   */
+  runner.register(RECYCLE_KIND, async () => {
+    const recycleDeps: RecycleDeps = {
+      sql: deps.sql,
+      ledger: deps.ledger,
+      logger: deps.logger.child({ job: RECYCLE_KIND }),
+      metrics: deps.metrics,
+      producer: deps.producer,
+      assetCode: deps.assetCode,
+      ...(deps.adminApi ? { adminApi: deps.adminApi } : {}),
+    }
+    const summary = await runRecycle(recycleDeps)
+    if (summary.posted > 0 || summary.deferred > 0 || summary.halted !== undefined) {
+      deps.logger.info('engagement fee recycle pass', { job: RECYCLE_KIND, ...summary })
     }
   })
 

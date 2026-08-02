@@ -78,3 +78,47 @@ test('the idempotency TTL cannot be set to zero days', () => {
 test('LOG_LEVEL is a closed set', () => {
   assert.throws(() => loadEnv({ ...BASE, LOG_LEVEL: 'verbose' }), /LOG_LEVEL must be one of/)
 })
+
+/* ------------------------------------------------------------------ the engagement fee recycle */
+
+test('no ADMIN_API_URL is a supported mode, not a missing variable', () => {
+  // docs/ecosystem/21 §3. Unconfigured means this deployment runs no engagement programme, which
+  // is a true statement rather than a fault — the notify-SMTP discipline. Requiring it would make
+  // every deployment without an operator surface refuse to boot.
+  assert.equal(loadEnv(BASE).adminApiBaseUrl, null)
+  assert.equal(loadEnv(BASE).adminApiToken, null)
+})
+
+test('an ADMIN_API_URL without a token is refused AT BOOT, not hourly inside a job', () => {
+  assert.throws(
+    () => loadEnv({ ...BASE, ADMIN_API_URL: 'http://admin-api.test:4000' }),
+    /BILLING_ADMIN_API_TOKEN is required/,
+  )
+  const configured = loadEnv({
+    ...BASE,
+    ADMIN_API_URL: 'http://admin-api.test:4000',
+    BILLING_ADMIN_API_TOKEN: 'A3kL9mZ2qW7xR4bV6nP1sD8jH5fG0yTc',
+  })
+  assert.equal(configured.adminApiBaseUrl, 'http://admin-api.test:4000')
+  assert.match(configured.adminApiToken ?? '', /^A3kL/)
+})
+
+test('the admin-api URL must be absolute, and its token is a secret', () => {
+  assert.throws(() => loadEnv({ ...BASE, ADMIN_API_URL: 'admin-api:4000' }), /absolute http/)
+  assert.throws(
+    () => loadEnv({ ...BASE, ADMIN_API_URL: 'http://admin-api.test:4000', BILLING_ADMIN_API_TOKEN: 'changeme' }),
+    /known placeholder/,
+  )
+})
+
+test('THE PERCENTAGE IS NOT AN ENVIRONMENT VARIABLE', () => {
+  // 21 §6 makes the fee-recycle rate an approval-gated action: raising it needs two operators.
+  // A variable here would be a third way to raise it — one that needs a deploy and no approval,
+  // and that nothing in admin-api's audit trail would ever record.
+  const keys = Object.keys(loadEnv(BASE))
+  assert.deepEqual(
+    keys.filter((key) => /recycl|bps|percent/i.test(key)),
+    [],
+    'the rate lives in admin-api and is read at run time, never configured here',
+  )
+})

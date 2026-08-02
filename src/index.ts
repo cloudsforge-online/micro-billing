@@ -26,6 +26,7 @@ import { SCHEMA_VERSION } from './migrations.ts'
 import { createServer, registerServiceMetrics } from './server.ts'
 import { registerHandlers, rescheduleRecurring, seedRecurring, type JobDeps } from './jobs.ts'
 import { httpLedgerClient } from './ledger.ts'
+import { httpAdminApiClient, type EngagementPolicyClient } from './adminapi.ts'
 import type { PurchaseDeps } from './purchases.ts'
 import type { Db } from './outbox.ts'
 
@@ -115,6 +116,26 @@ const ledger = httpLedgerClient({
   originatingService: SERVICE,
 })
 
+/**
+ * micro-admin-api, or nothing at all — docs/ecosystem/21 §3.
+ *
+ * Constructed only when the URL is configured, so "no engagement programme in this deployment" is
+ * an absent client rather than a client that fails hourly. `env.ts` has already refused a URL
+ * without a token, so the non-null assertion below is the type system catching up with a check
+ * that has run.
+ */
+const adminApi: EngagementPolicyClient | undefined =
+  env.adminApiBaseUrl === null
+    ? undefined
+    : httpAdminApiClient({
+        baseUrl: env.adminApiBaseUrl,
+        token: () => env.adminApiToken ?? undefined,
+        deadlineMs: env.adminApiDeadlineMs,
+      })
+if (adminApi === undefined) {
+  logger.info('no ADMIN_API_URL — the engagement fee recycle is off in this deployment')
+}
+
 const purchases: PurchaseDeps = {
   sql: sql as unknown as Db,
   ledger,
@@ -153,6 +174,7 @@ const jobDeps: JobDeps = {
   assetCode: env.purchaseAsset,
   signingSecret: env.outboxSigningSecret,
   idempotencyTtlDays: env.idempotencyTtlDays,
+  ...(adminApi ? { adminApi } : {}),
 }
 
 const queue = new JobQueue(sql as unknown as JobsSql, { owner: env.instanceId })
