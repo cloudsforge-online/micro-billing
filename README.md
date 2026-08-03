@@ -1,5 +1,7 @@
 # `micro-billing`
 
+[![ci](https://github.com/cloudsforge-online/micro-billing/actions/workflows/ci.yml/badge.svg)](https://github.com/cloudsforge-online/micro-billing/actions/workflows/ci.yml) [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](./tsconfig.base.json) [![node](https://img.shields.io/badge/node-%3E%3D22-5FA04E?logo=nodedotjs&logoColor=white)](./package.json) [![tests](https://img.shields.io/badge/tests-real%20Postgres-4169E1?logo=postgresql&logoColor=white)](./.github/workflows/ci.yml)
+
 The catalogue, purchases, subscriptions and — the part this service exists for — **entitlements
 with a scope, an expiry and a revocation**. It answers "does this subject own this thing, for this
 title, right now" to a *service*, which is a question nothing in the estate could previously ask.
@@ -285,5 +287,5 @@ skipped.
 
 ## Provenance
 
-The code in this repository was written by **Claude Opus 5** and **Claude Fable 5**, under
-human direction and review.
+The code in this repository was written by **Claude Opus 5** and **Claude Fable 5**, assets
+generated with **FLUX 2 Pro**, under human direction and review.
