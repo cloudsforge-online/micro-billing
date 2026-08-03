@@ -4,6 +4,8 @@ The catalogue, purchases, subscriptions and — the part this service exists for
 with a scope, an expiry and a revocation**. It answers "does this subject own this thing, for this
 title, right now" to a *service*, which is a question nothing in the estate could previously ask.
 
+Design authority: [`ecosystem/03-repository-responsibilities.md`](https://github.com/cloudsforge-online/micro-docs/blob/main/ecosystem/03-repository-responsibilities.md)
+
 > **It holds no money.** Every purchase, renewal and refund is a balanced journal entry posted to
 > `micro-ledger` over HTTP with a scoped token. There is no second connection string in
 > `src/env.ts`, and the file says why: a shared connection string would make the ledger's constraint
@@ -278,3 +280,10 @@ skipped.
 * **Payouts are modelled and not driven.** `payouts` carries the consistency constraint and the
   `journal_entry_id` seam (`src/migrations.ts:360-383`), and no job moves a row through
   `pending → approved → paid`.
+
+---
+
+## Provenance
+
+The code in this repository was written by **Claude Opus 5** and **Claude Fable 5**, under
+human direction and review.
