@@ -46,9 +46,28 @@
  */
 
 import { HttpClient, HttpError } from '@cloudsforge/http'
+import type { LiveScope } from '@cloudsforge/contracts-auth'
 
-/** The scope billing's admin-api token must hold. Exact-matched on the other side. */
-export const ADMIN_API_SCOPES: readonly string[] = Object.freeze(['admin:read'])
+/**
+ * The scope billing's admin-api token must hold. Exact-matched on the other side.
+ *
+ * `readonly LiveScope[]`, not `readonly string[]`. This constant is an OUTBOUND demand — what
+ * billing presents to admin-api — and that direction had never been checked by anything.
+ * `service-ci.yml`'s scope audit reads a repository's INBOUND route gates, which is why two
+ * services in this estate declared scopes that do not exist (`policy:evaluate`,
+ * `custody:address`) and nothing noticed. `micro-deploy`'s `derive-grants.mjs` reads this
+ * constant into `IDENTITY_SERVICE_TOKEN_GRANTS`, and identity validates that list against the
+ * registry at import and REFUSES TO BOOT on a name it does not know — so a typo here is not a 403
+ * on one billing call, it is no token minting for the whole estate.
+ *
+ * `LiveScope` rather than `Scope` because `Scope` is `keyof typeof SCOPES` — every registered key,
+ * DEPRECATED ones included — and identity will not mint a deprecated scope either. `LiveScope =
+ * Exclude<Scope, DeprecatedScope>`, with `DeprecatedScope` computed FROM `SCOPES` by a conditional
+ * type over the `deprecated` field rather than hand-listed, so it cannot drift from the registry
+ * (`contracts/packages/auth/src/index.ts:507`). Reading a token stays wide — one may arrive
+ * carrying a scope that has since died — and demanding is narrow. This is demanding.
+ */
+export const ADMIN_API_SCOPES: readonly LiveScope[] = Object.freeze(['admin:read'])
 
 /**
  * 2500 bps = 25%. Billing's copy of `engagement_fee_recycle_within_ceiling`
