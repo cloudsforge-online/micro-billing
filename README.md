@@ -192,7 +192,9 @@ says `OUTBOX_SIGNING_SECRET` needs "at least 32 random characters" and the code 
 | `OUTBOX_SIGNING_SECRET` | — | **required, ≥24 chars, placeholders refused** (`src/env.ts:160`) |
 | `INSTANCE_ID` | hostname | names this replica in `jobs.locked_by` (`src/env.ts:161`) |
 | `BILLING_LEDGER_URL` | — | **required, and validated as an absolute `http(s)` URL** at boot rather than at first purchase (`src/env.ts:144-147`) |
-| `BILLING_LEDGER_TOKEN` | — | **required, ≥24 chars.** Carries `ledger:post` and `ledger:read`, issued by identity's `POST /service-tokens` and **short-lived by design — rotation IS expiry** (SD-12). Read once and handed to `HttpClient` through its async `token` callback, which is the seam a refresh loop plugs into without anything else changing. Expired → every purchase fails 401 at the ledger (`src/env.ts:163`, reasoning at `:106-113`) |
+| `BILLING_IDENTITY_CREDENTIAL` | — | **≥24 chars, `cfsc_…`.** The long-lived credential exchanged at `POST /service-tokens/exchange` for short-lived tokens. Replaces `BILLING_LEDGER_TOKEN` **and** `BILLING_ADMIN_API_TOKEN`: both were 600-second tokens read once at boot, so ten minutes into every deployment every posting to the ledger failed. One credential, two narrow tokens — the scope set is a request parameter, not a second secret. Technically optional so the image can boot for CI's `/livez` smoke test; `/readyz` fails hard without it |
+| `IDENTITY_URL` | `IDENTITY_ISSUER` | where the credential is exchanged. Only set it where the issuer and the dialled address genuinely differ |
+| `BILLING_LEDGER_TOKEN`, `BILLING_ADMIN_API_TOKEN` | — | **retired.** 600-second tokens read once at boot. If either is still set, boot logs that it is ignored |
 | `BILLING_LEDGER_DEADLINE_MS` | `5000` | 250–30000. **It bounds how long the purchase transaction stays open**, because the posting happens inside it. Too generous and a slow ledger holds a database connection per in-flight purchase; too tight and a healthy retry never completes (`src/env.ts:164`, reasoning at `:115-121`) |
 | `BILLING_IDEMPOTENCY_TTL_DAYS` | `30` | 1–3650. **Expiring a key early means the next replay of it buys the thing a second time**, so this must outlive every caller's retry horizon (`src/env.ts:166`) |
 | `BILLING_TEST_DATABASE_URL` | — | tests only; the name must contain `test`. Unset, every database-backed test **skips** |
@@ -205,7 +207,7 @@ says `OUTBOX_SIGNING_SECRET` needs "at least 32 random characters" and the code 
 
 | Upstream | Routes called | When it is down |
 | --- | --- | --- |
-| `micro-ledger` | `POST /entries` (`src/ledger.ts:159`) and `POST /entries/:id/reverse` for a refund (`src/ledger.ts:184`), verified against `ledger/src/server.ts:346` and `:394`, reached with `BILLING_LEDGER_TOKEN` | **fail closed, and structurally so.** The posting happens *inside* the purchase transaction (`src/purchases.ts:20-25`), so a ledger outage fails the purchase whole: no entitlement is granted, no `granted` event is emitted, and the customer is told. The alternative grants the thing before the money moves |
+| `micro-ledger` | `POST /entries` (`src/ledger.ts:159`) and `POST /entries/:id/reverse` for a refund (`src/ledger.ts:184`), verified against `ledger/src/server.ts:346` and `:394`, reached with a token exchanged from `BILLING_IDENTITY_CREDENTIAL` | **fail closed, and structurally so.** The posting happens *inside* the purchase transaction (`src/purchases.ts:20-25`), so a ledger outage fails the purchase whole: no entitlement is granted, no `granted` event is emitted, and the customer is told. The alternative grants the thing before the money moves |
 | `micro-identity` | its JWKS at `IDENTITY_JWKS_URL` | domain routes answer 503, never 401 |
 | `event_subscriptions` rows | signed HMAC deliveries from the outbox relay | fail open, per subscriber; the undelivered row is the durable record |
 
@@ -266,7 +268,7 @@ skipped.
   fails closed and is the better pattern.
 * **`.env.test` and `.env.test.example` are committed with real-looking values** —
   `OUTBOX_SIGNING_SECRET='K2sN4vQ8xR1wB6tY9zL3mF7hC5jD0pA4'` and a matching
-  `BILLING_LEDGER_TOKEN`. They are test-only and the database they name is a local `_test`, so
+  `BILLING_IDENTITY_CREDENTIAL`. They are test-only and the database they name is a local `_test`, so
   nothing is disclosed; but they are indistinguishable from real credentials to a scanner and to a
   reader.
 * **`/metrics` is unauthenticated** (`src/server.ts:356`).

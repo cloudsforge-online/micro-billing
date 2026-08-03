@@ -66,6 +66,26 @@ function requiredSecret(source: Source, name: string, minLength = 24): string {
   return value
 }
 
+/**
+ * A secret that may be absent, but must be real if present.
+ *
+ * The distinction matters for the identity credential: absent is a deployment that has not been
+ * given one yet and is reported by `/readyz`; a short placeholder is a deployment that believes it
+ * HAS one, and would fail on its first call to a peer with a 401 that reads as "identity rejected
+ * billing" rather than "nobody set this variable".
+ */
+function optionalSecret(source: Source, name: string, minLength = 24): string | null {
+  const value = source[name]?.trim()
+  if (!value) return null
+  if (PLACEHOLDERS.has(value.toLowerCase())) {
+    throw new EnvError(`${name} is set to a known placeholder — generate a real secret`)
+  }
+  if (value.length < minLength) {
+    throw new EnvError(`${name} must be at least ${minLength} characters (got ${value.length})`)
+  }
+  return value
+}
+
 function optional(source: Source, name: string, fallback: string): string {
   const value = source[name]?.trim()
   return value && value.length > 0 ? value : fallback
@@ -104,14 +124,35 @@ export interface Env {
   /** Where the ledger is. Billing holds no balance; every movement of value is posted there. */
   readonly ledgerBaseUrl: string
   /**
-   * The service token billing presents to the ledger, carrying `ledger:post` and `ledger:read`.
+   * Where identity is, for `POST /service-tokens/exchange`.
    *
-   * Issued by identity's `POST /service-tokens` and short-lived by design (SD-12: rotation IS
-   * expiry). It is read once here and handed to `HttpClient` through its async `token` callback,
-   * which is the seam a refresh loop plugs into without anything else in the service changing.
-   * The shared `PAY_SERVICE_TOKEN` this replaces had no identity, no scope and no expiry.
+   * Defaults to `IDENTITY_ISSUER`, which is already required and is identity's own base URL — the
+   * issuer of a token is by definition where the token came from. `IDENTITY_URL` overrides it where
+   * the two genuinely differ.
    */
-  readonly ledgerToken: string
+  readonly identityUrl: string
+
+  /**
+   * **The long-lived credential this service exchanges for short-lived tokens.**
+   *
+   * It replaces `BILLING_LEDGER_TOKEN` and `BILLING_ADMIN_API_TOKEN`, both of which were 600-second
+   * tokens read once at boot (identity/src/tokens.ts:28). Ten minutes into any deployment they
+   * expired and every posting to the ledger failed; nothing could re-mint them, because minting
+   * requires the `admin` role. A credential is not a token: it confers nothing by itself, it is
+   * revocable, and it survives a restart.
+   *
+   * ONE credential for both peers, because identity reads the service off the credential ROW and
+   * never off the request — so one credential mints every token billing is allowed. The two
+   * clients ask it for different SCOPES, which is a request parameter, not a second secret.
+   *
+   * OPTIONAL, so the image can BOOT for CI's `/livez` smoke test, whose environment is fixed in a
+   * workflow file. The absence is not silent: `/readyz` reports `identity-credential` as a HARD
+   * failure and every upstream call fails closed with 503.
+   */
+  readonly identityCredential: string | null
+
+  /** Whether the retired `BILLING_LEDGER_TOKEN` is still set. Read only so boot can say it is ignored. */
+  readonly legacyServiceTokenPresent: boolean
   /**
    * Absolute wall-clock ceiling on a ledger call, across retries.
    *
@@ -142,13 +183,6 @@ export interface Env {
    * raise, bypassing the gate.
    */
   readonly adminApiBaseUrl: string | null
-  /**
-   * The service token billing presents to admin-api, carrying the exact scope `admin:read`.
-   *
-   * Required only when `ADMIN_API_URL` is set — a URL with no token is a configuration that
-   * cannot work, and failing at boot beats failing hourly in a job nobody is watching.
-   */
-  readonly adminApiToken: string | null
   readonly adminApiDeadlineMs: number
 }
 
@@ -177,7 +211,6 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
   if (adminApiBaseUrl !== null && !/^https?:\/\//i.test(adminApiBaseUrl)) {
     throw new EnvError(`ADMIN_API_URL must be an absolute http(s) URL (got ${adminApiBaseUrl})`)
   }
-  const adminApiToken = adminApiBaseUrl === null ? null : requiredSecret(source, 'BILLING_ADMIN_API_TOKEN')
 
   return {
     port: integer(source, 'PORT', 4000, 1, 65_535),
@@ -193,12 +226,17 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     outboxSigningSecret: requiredSecret(source, 'OUTBOX_SIGNING_SECRET'),
     instanceId: optional(source, 'INSTANCE_ID', host || 'unknown'),
     ledgerBaseUrl,
-    ledgerToken: requiredSecret(source, 'BILLING_LEDGER_TOKEN'),
+    identityUrl: optional(source, 'IDENTITY_URL', required(source, 'IDENTITY_ISSUER')),
+    // Not `requiredSecret`: see the field comment. The absence is caught by `/readyz`, which is
+    // a check that can fail, rather than by a boot CI cannot perform.
+    identityCredential: optionalSecret(source, 'BILLING_IDENTITY_CREDENTIAL'),
+    legacyServiceTokenPresent:
+      (source['BILLING_LEDGER_TOKEN']?.trim() ?? '').length > 0 ||
+      (source['BILLING_ADMIN_API_TOKEN']?.trim() ?? '').length > 0,
     ledgerDeadlineMs: integer(source, 'BILLING_LEDGER_DEADLINE_MS', 5_000, 250, 30_000),
     purchaseAsset: 'SHARD',
     idempotencyTtlDays: integer(source, 'BILLING_IDEMPOTENCY_TTL_DAYS', 30, 1, 3_650),
     adminApiBaseUrl,
-    adminApiToken,
     adminApiDeadlineMs: integer(source, 'BILLING_ADMIN_API_DEADLINE_MS', 5_000, 250, 30_000),
   }
 }

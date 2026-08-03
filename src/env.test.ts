@@ -15,7 +15,6 @@ const VALID: Record<string, string> = {
   IDENTITY_ISSUER: 'http://identity.test',
   OUTBOX_SIGNING_SECRET: 'K2sN4vQ8xR1wB6tY9zL3mF7hC5jD0pA4',
   BILLING_LEDGER_URL: 'http://ledger.test:4000',
-  BILLING_LEDGER_TOKEN: 'T7uW2kM9pX4bV6nQ1sD8jH3fG5rL0yZa',
 }
 for (const [key, value] of Object.entries(VALID)) process.env[key] = value
 
@@ -49,9 +48,18 @@ test('a ledger URL that is not absolute is refused rather than silently relative
   assert.throws(() => loadEnv({ ...BASE, BILLING_LEDGER_URL: 'ledger:4000' }), /absolute http/)
 })
 
-test('the ledger token is a secret, so a placeholder is refused', () => {
-  assert.throws(() => loadEnv({ ...BASE, BILLING_LEDGER_TOKEN: 'changeme' }), /known placeholder/)
-  assert.throws(() => loadEnv({ ...BASE, BILLING_LEDGER_TOKEN: 'short' }), /at least 24 characters/)
+test('the identity credential is a secret, so a placeholder is refused', () => {
+  // BILLING_LEDGER_TOKEN was the subject here. It is retired — a 600-second token read once at
+  // boot — and the credential that replaced it takes the same placeholder and length checks for
+  // the same reasons.
+  assert.throws(
+    () => loadEnv({ ...BASE, BILLING_IDENTITY_CREDENTIAL: 'changeme' }),
+    /known placeholder/,
+  )
+  assert.throws(
+    () => loadEnv({ ...BASE, BILLING_IDENTITY_CREDENTIAL: 'short' }),
+    /at least 24 characters/,
+  )
   assert.throws(() => loadEnv({ ...BASE, OUTBOX_SIGNING_SECRET: 'placeholder' }), /known placeholder/)
 })
 
@@ -86,29 +94,19 @@ test('no ADMIN_API_URL is a supported mode, not a missing variable', () => {
   // is a true statement rather than a fault — the notify-SMTP discipline. Requiring it would make
   // every deployment without an operator surface refuse to boot.
   assert.equal(loadEnv(BASE).adminApiBaseUrl, null)
-  assert.equal(loadEnv(BASE).adminApiToken, null)
 })
 
-test('an ADMIN_API_URL without a token is refused AT BOOT, not hourly inside a job', () => {
-  assert.throws(
-    () => loadEnv({ ...BASE, ADMIN_API_URL: 'http://admin-api.test:4000' }),
-    /BILLING_ADMIN_API_TOKEN is required/,
-  )
-  const configured = loadEnv({
-    ...BASE,
-    ADMIN_API_URL: 'http://admin-api.test:4000',
-    BILLING_ADMIN_API_TOKEN: 'A3kL9mZ2qW7xR4bV6nP1sD8jH5fG0yTc',
-  })
+test('an ADMIN_API_URL no longer needs a SECOND secret — one credential mints both scopes', () => {
+  // BILLING_ADMIN_API_TOKEN used to be required alongside the URL, and was refused at boot without
+  // it. Both it and BILLING_LEDGER_TOKEN were 600-second tokens read once at boot. Identity reads
+  // the service off the credential ROW and never off the request, so one credential mints
+  // everything billing is allowed and the scope set is a request parameter, not a second secret.
+  const configured = loadEnv({ ...BASE, ADMIN_API_URL: 'http://admin-api.test:4000' })
   assert.equal(configured.adminApiBaseUrl, 'http://admin-api.test:4000')
-  assert.match(configured.adminApiToken ?? '', /^A3kL/)
 })
 
-test('the admin-api URL must be absolute, and its token is a secret', () => {
+test('the admin-api URL must be absolute', () => {
   assert.throws(() => loadEnv({ ...BASE, ADMIN_API_URL: 'admin-api:4000' }), /absolute http/)
-  assert.throws(
-    () => loadEnv({ ...BASE, ADMIN_API_URL: 'http://admin-api.test:4000', BILLING_ADMIN_API_TOKEN: 'changeme' }),
-    /known placeholder/,
-  )
 })
 
 test('THE PERCENTAGE IS NOT AN ENVIRONMENT VARIABLE', () => {
@@ -120,5 +118,41 @@ test('THE PERCENTAGE IS NOT AN ENVIRONMENT VARIABLE', () => {
     keys.filter((key) => /recycl|bps|percent/i.test(key)),
     [],
     'the rate lives in admin-api and is read at run time, never configured here',
+  )
+})
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * The credential that replaced BILLING_LEDGER_TOKEN and BILLING_ADMIN_API_TOKEN.
+ * ──────────────────────────────────────────────────────────────────────────────────────────────── */
+
+test('the identity credential is read, and its absence is a null rather than a throw', () => {
+  const CREDENTIAL = 'cfsc_a-long-lived-credential-that-does-not-expire'
+  assert.equal(
+    loadEnv({ ...BASE, BILLING_IDENTITY_CREDENTIAL: CREDENTIAL }).identityCredential,
+    CREDENTIAL,
+  )
+  // Absent must LOAD — the image has to boot without one so the CI smoke test can read /livez —
+  // and is caught by the hard `identity-credential` readiness probe instead.
+  assert.equal(loadEnv(BASE).identityCredential, null)
+})
+
+test('identityUrl derives from the issuer, and IDENTITY_URL overrides it', () => {
+  assert.equal(loadEnv(BASE).identityUrl, BASE['IDENTITY_ISSUER'])
+  assert.equal(
+    loadEnv({ ...BASE, IDENTITY_URL: 'http://identity.internal:4000' }).identityUrl,
+    'http://identity.internal:4000',
+  )
+})
+
+test('either retired token being set is reported rather than obeyed', () => {
+  assert.equal(loadEnv(BASE).legacyServiceTokenPresent, false)
+  const legacyLedger = loadEnv({ ...BASE, BILLING_LEDGER_TOKEN: 'T7uW2kM9pX4bV6nQ1sD8jH3fG5rL0yZa' })
+  assert.equal(legacyLedger.legacyServiceTokenPresent, true)
+  // And it confers nothing: setting it must not make the service look configured.
+  assert.equal(legacyLedger.identityCredential, null)
+  assert.equal(
+    loadEnv({ ...BASE, BILLING_ADMIN_API_TOKEN: 'A3kL9mZ2qW7xR4bV6nP1sD8jH5fG0yTc' })
+      .legacyServiceTokenPresent,
+    true,
   )
 })

@@ -18,15 +18,14 @@
 import postgres from 'postgres'
 import { assertSchemaAtLeast, type Sql as DbSql } from '@cloudsforge/db'
 import { JobQueue, JobRunner, type Sql as JobsSql } from '@cloudsforge/jobs'
-import { Verifier } from '@cloudsforge/auth'
+import { Verifier, serviceTokenProbe } from '@cloudsforge/auth'
 import { Lifecycle, httpProbe, installSignalHandlers, postgresProbe } from '@cloudsforge/lifecycle'
 import { Logger, Metrics, registerHttpMetrics, registerJobMetrics } from '@cloudsforge/telemetry'
 import { SERVICE, env } from './env.ts'
 import { SCHEMA_VERSION } from './migrations.ts'
 import { createServer, registerServiceMetrics } from './server.ts'
 import { registerHandlers, rescheduleRecurring, seedRecurring, type JobDeps } from './jobs.ts'
-import { httpLedgerClient } from './ledger.ts'
-import { httpAdminApiClient, type EngagementPolicyClient } from './adminapi.ts'
+import { buildUpstreams } from './upstreams.ts'
 import type { PurchaseDeps } from './purchases.ts'
 import type { Db } from './outbox.ts'
 
@@ -107,34 +106,53 @@ lifecycle
     httpProbe('ledger', `${env.ledgerBaseUrl.replace(/\/+$/, '')}/livez`, { kind: 'soft' }),
   )
 
-const ledger = httpLedgerClient({
-  baseUrl: env.ledgerBaseUrl,
-  // Async by contract, so the ten-minute service token identity issues can be refreshed here
-  // without anything else in the service changing.
-  token: () => env.ledgerToken,
-  deadlineMs: env.ledgerDeadlineMs,
+const { identityTokens, ledger, adminApi } = buildUpstreams(env, {
   originatingService: SERVICE,
+  onEvent: (event) => {
+    if (event.kind === 'exchange_failed') {
+      // `warn`, not `error`, while a usable token is still held: the 20% slack after the refresh
+      // point exists precisely so a few of these are survivable and uninteresting.
+      const level = event.hadUsableToken ? 'warn' : 'error'
+      logger[level]('service token exchange failed', {
+        err: event.err,
+        hadUsableToken: event.hadUsableToken,
+      })
+    } else if (event.kind === 'minted') {
+      logger.info('service token minted', {
+        service: event.service,
+        expiresIn: event.expiresIn,
+        refreshInMs: event.refreshInMs,
+      })
+    } else {
+      logger.warn('service token', { event: event.kind, url: event.url })
+    }
+  },
 })
 
-/**
- * micro-admin-api, or nothing at all — docs/ecosystem/21 §3.
- *
- * Constructed only when the URL is configured, so "no engagement programme in this deployment" is
- * an absent client rather than a client that fails hourly. `env.ts` has already refused a URL
- * without a token, so the non-null assertion below is the type system catching up with a check
- * that has run.
- */
-const adminApi: EngagementPolicyClient | undefined =
-  env.adminApiBaseUrl === null
-    ? undefined
-    : httpAdminApiClient({
-        baseUrl: env.adminApiBaseUrl,
-        token: () => env.adminApiToken ?? undefined,
-        deadlineMs: env.adminApiDeadlineMs,
-      })
+if (!identityTokens) {
+  // Not `fatal` and exit: the image must be able to boot without this so CI's startup smoke test
+  // can read /livez, and a service that refuses to start is a service whose logs nobody reads.
+  // `/readyz` is where the absence is enforced — the `identity-credential` probe is hard, so an
+  // unconfigured replica takes no traffic.
+  logger.error('BILLING_IDENTITY_CREDENTIAL is not set; every call to a peer will fail 503', {
+    hint: 'deploy/scripts/estate-bootstrap.sh writes it to compose/estate/tokens.env',
+  })
+}
+if (env.legacyServiceTokenPresent) {
+  logger.error('BILLING_LEDGER_TOKEN / BILLING_ADMIN_API_TOKEN are set and are IGNORED', {
+    hint: 'both were 600-second tokens read once at boot; BILLING_IDENTITY_CREDENTIAL replaces them',
+  })
+}
 if (adminApi === undefined) {
   logger.info('no ADMIN_API_URL — the engagement fee recycle is off in this deployment')
 }
+
+// Added here rather than in the chain above because it closes over the provider, which is built
+// with the upstreams. HARD, unlike the two soft probes above: it does not report a peer having a
+// bad minute, it fails only when no credential is configured at all — a deployment that cannot
+// post a single ledger entry and will not fix itself. An identity OUTAGE returns warn,
+// deliberately, so one bad minute in identity does not empty every balancer in the estate.
+lifecycle.addProbe(serviceTokenProbe(identityTokens))
 
 const purchases: PurchaseDeps = {
   sql: sql as unknown as Db,
