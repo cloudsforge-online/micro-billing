@@ -57,6 +57,8 @@ import {
   resetBilling,
   skip,
   type FakeLedger,
+  fakePricing,
+  emberFor,
 } from './testsupport.ts'
 import type { Db } from './outbox.ts'
 
@@ -105,7 +107,7 @@ function deps(overrides: Partial<RecycleDeps> = {}): RecycleDeps {
     logger: new Logger({ service: 'billing-test', level: 'error' }),
     metrics: new Metrics(),
     producer: 'billing',
-    assetCode: 'SHARD',
+    assetCode: 'EMBER',
     adminApi: policyClient(0),
     ...overrides,
   }
@@ -113,7 +115,7 @@ function deps(overrides: Partial<RecycleDeps> = {}): RecycleDeps {
 
 /** A completed purchase, backdated — the ordinary way fee revenue arrives in a period. */
 async function buy(at: Date, sku = 'cosmetic.ember-cape', quantity = 1n): Promise<void> {
-  const purchaseDeps: PurchaseDeps = { sql: db, ledger, producer: 'billing', assetCode: 'SHARD' }
+  const purchaseDeps: PurchaseDeps = { sql: db, ledger, producer: 'billing', priceAsset: 'USD', settlementAsset: 'EMBER', pricing: fakePricing() }
   const request = {
     subject: ALICE,
     sku,
@@ -135,14 +137,14 @@ describe('§7.5 — the percentage cannot exceed its schema ceiling', () => {
     // At the ceiling: accepted.
     await sql`
       insert into engagement_fee_recycles (asset_code, period_start, period_end, gross_shards, refunded_shards, recycle_bps)
-      values ('SHARD', ${DAY_1}, ${DAY_2}, 0, 0, ${FEE_RECYCLE_CEILING_BPS})
+      values ('EMBER', ${DAY_1}, ${DAY_2}, 0, 0, ${FEE_RECYCLE_CEILING_BPS})
     `
     // One basis point above it: refused by the database, not by a handler. This is the assertion
     // that keeps `FEE_RECYCLE_CEILING_BPS` honest — a drifting constant fails here.
     await assert.rejects(
       sql`
         insert into engagement_fee_recycles (asset_code, period_start, period_end, gross_shards, refunded_shards, recycle_bps)
-        values ('SHARD', ${DAY_2}, ${DAY_3}, 0, 0, ${FEE_RECYCLE_CEILING_BPS + 1})
+        values ('EMBER', ${DAY_2}, ${DAY_3}, 0, 0, ${FEE_RECYCLE_CEILING_BPS + 1})
       `,
       /engagement_fee_recycles_within_ceiling/,
     )
@@ -152,7 +154,7 @@ describe('§7.5 — the percentage cannot exceed its schema ceiling', () => {
     await assert.rejects(
       sql`
         insert into engagement_fee_recycles (asset_code, period_start, period_end, gross_shards, refunded_shards, recycle_bps)
-        values ('SHARD', ${DAY_1}, ${DAY_2}, 100, 0, -1)
+        values ('EMBER', ${DAY_1}, ${DAY_2}, 100, 0, -1)
       `,
       /engagement_fee_recycles_within_ceiling/,
     )
@@ -201,7 +203,7 @@ describe('the amount is generated, floored, and never over the share', () => {
   test('floor, not round — 500 bps of 99,999 is 4,999 and not 5,000', { skip }, async () => {
     await sql`
       insert into engagement_fee_recycles (asset_code, period_start, period_end, gross_shards, refunded_shards, recycle_bps)
-      values ('SHARD', ${DAY_1}, ${DAY_2}, 99999, 0, 500)
+      values ('EMBER', ${DAY_1}, ${DAY_2}, 99999, 0, 500)
     `
     const [row] = await sql<{ amount: string }[]>`
       select amount_shards::text as amount from engagement_fee_recycles where period_start = ${DAY_1}
@@ -212,7 +214,7 @@ describe('the amount is generated, floored, and never over the share', () => {
   test('refunds beyond the takings recycle nothing rather than draining the treasury', { skip }, async () => {
     await sql`
       insert into engagement_fee_recycles (asset_code, period_start, period_end, gross_shards, refunded_shards, recycle_bps)
-      values ('SHARD', ${DAY_1}, ${DAY_2}, 10, 40, 2500)
+      values ('EMBER', ${DAY_1}, ${DAY_2}, 10, 40, 2500)
     `
     const [row] = await sql<{ amount: string }[]>`
       select amount_shards::text as amount from engagement_fee_recycles where period_start = ${DAY_1}
@@ -227,7 +229,7 @@ describe('the amount is generated, floored, and never over the share', () => {
       sql`
         insert into engagement_fee_recycles
           (asset_code, period_start, period_end, gross_shards, refunded_shards, recycle_bps, amount_shards)
-        values ('SHARD', ${DAY_1}, ${DAY_2}, 100, 0, 100, 99999)
+        values ('EMBER', ${DAY_1}, ${DAY_2}, 100, 0, 100, 99999)
       `,
       /non-DEFAULT value into column "amount_shards"/,
     )
@@ -242,7 +244,7 @@ describe('§7.4 — a posted recycle names its entry, and only a posted one does
       sql`
         insert into engagement_fee_recycles
           (asset_code, period_start, period_end, gross_shards, refunded_shards, recycle_bps, status, journal_entry_id)
-        values ('SHARD', ${DAY_1}, ${DAY_2}, 100, 0, 100, 'pending', 'entry-000001')
+        values ('EMBER', ${DAY_1}, ${DAY_2}, 100, 0, 100, 'pending', 'entry-000001')
       `,
       /engagement_fee_recycles_posted_names_entry/,
     )
@@ -253,7 +255,7 @@ describe('§7.4 — a posted recycle names its entry, and only a posted one does
       sql`
         insert into engagement_fee_recycles
           (asset_code, period_start, period_end, gross_shards, refunded_shards, recycle_bps, status)
-        values ('SHARD', ${DAY_1}, ${DAY_2}, 100, 0, 100, 'posted')
+        values ('EMBER', ${DAY_1}, ${DAY_2}, 100, 0, 100, 'posted')
       `,
       /engagement_fee_recycles_posted_names_entry/,
     )
@@ -265,7 +267,7 @@ describe('§7.4 — a posted recycle names its entry, and only a posted one does
       sql`
         insert into engagement_fee_recycles
           (asset_code, period_start, period_end, gross_shards, refunded_shards, recycle_bps, status)
-        values ('SHARD', ${DAY_1}, ${DAY_2}, 1000, 0, 500, 'skipped')
+        values ('EMBER', ${DAY_1}, ${DAY_2}, 1000, 0, 500, 'skipped')
       `,
       /engagement_fee_recycles_skipped_moves_nothing/,
     )
@@ -281,8 +283,8 @@ describe('periodBasis — every term is an entry billing actually posted', () =>
     await buy(new Date('2026-08-02T00:00:00.000Z'), 'season.pass.s1') // 1000, next period
     await buy(new Date('2026-07-31T23:59:59.000Z'), 'cosmetic.ember-cape') // 250, previous
 
-    const basis = await periodBasis(db, 'SHARD', DAY_1, DAY_2)
-    assert.equal(basis.grossShards, 650n, 'the period is half-open: [start, end)')
+    const basis = await periodBasis(db, 'EMBER', DAY_1, DAY_2)
+    assert.equal(basis.grossShards, emberFor(250n) + emberFor(400n), 'the period is half-open: [start, end)')
     assert.equal(basis.refundedShards, 0n)
   })
 
@@ -293,13 +295,13 @@ describe('periodBasis — every term is an entry billing actually posted', () =>
     // already been recycled.
     await sql`update purchases set status = 'refunded', refunded_at = ${new Date('2026-08-02T09:00:00.000Z')}`
 
-    const first = await periodBasis(db, 'SHARD', DAY_1, DAY_2)
-    assert.equal(first.grossShards, 250n, 'the sale still happened that day')
+    const first = await periodBasis(db, 'EMBER', DAY_1, DAY_2)
+    assert.equal(first.grossShards, emberFor(250n), 'the sale still happened that day')
     assert.equal(first.refundedShards, 0n)
 
-    const second = await periodBasis(db, 'SHARD', DAY_2, DAY_3)
+    const second = await periodBasis(db, 'EMBER', DAY_2, DAY_3)
     assert.equal(second.grossShards, 0n)
-    assert.equal(second.refundedShards, 250n)
+    assert.equal(second.refundedShards, emberFor(250n))
   })
 
   test('a renewal invoice counts, and an invoice that moved nothing does not', { skip }, async () => {
@@ -308,9 +310,9 @@ describe('periodBasis — every term is an entry billing actually posted', () =>
     // and moved nothing, which is what the `journal_entry_id is not null` condition excludes.
     await sql`
       insert into invoices (subject, subscription_id, period_start, period_end, asset_code, total, status, journal_entry_id, created_at)
-      values (${ALICE}, null, ${DAY_1}, ${DAY_2}, 'SHARD', 500, 'paid', 'entry-r1', ${DAY_1})
+      values (${ALICE}, null, ${DAY_1}, ${DAY_2}, 'EMBER', ${emberFor(500n).toString()}::numeric, 'paid', 'entry-r1', ${DAY_1})
     `
-    let basis = await periodBasis(db, 'SHARD', DAY_1, DAY_2)
+    let basis = await periodBasis(db, 'EMBER', DAY_1, DAY_2)
     assert.equal(basis.grossShards, 0n, 'an invoice with no subscription is not a renewal')
 
     const [sub] = await sql<{ id: string }[]>`
@@ -322,14 +324,14 @@ describe('periodBasis — every term is an entry billing actually posted', () =>
     `
     await sql`
       insert into invoices (subject, subscription_id, period_start, period_end, asset_code, total, status, journal_entry_id, created_at)
-      values (${ALICE}, ${sub!.id}, ${DAY_1}, ${DAY_2}, 'SHARD', 500, 'paid', 'entry-r2', ${DAY_1})
+      values (${ALICE}, ${sub!.id}, ${DAY_1}, ${DAY_2}, 'EMBER', ${emberFor(500n).toString()}::numeric, 'paid', 'entry-r2', ${DAY_1})
     `
     await sql`
       insert into invoices (subject, subscription_id, period_start, period_end, asset_code, total, status, journal_entry_id, created_at)
-      values (${ALICE}, ${sub!.id}, ${DAY_1}, ${DAY_2}, 'SHARD', 900, 'open', null, ${DAY_1})
+      values (${ALICE}, ${sub!.id}, ${DAY_1}, ${DAY_2}, 'EMBER', ${emberFor(900n).toString()}::numeric, 'open', null, ${DAY_1})
     `
-    basis = await periodBasis(db, 'SHARD', DAY_1, DAY_2)
-    assert.equal(basis.grossShards, 500n, 'only the renewal that posted an entry counts')
+    basis = await periodBasis(db, 'EMBER', DAY_1, DAY_2)
+    assert.equal(basis.grossShards, emberFor(500n), 'only the renewal that posted an entry counts')
   })
 })
 
@@ -338,7 +340,7 @@ describe('periodBasis — every term is an entry billing actually posted', () =>
 describe('duePeriods — closed days only, contiguous, oldest first', () => {
   test('today is never a candidate, however late in the day it is', { skip }, async () => {
     await buy(new Date('2026-08-01T09:00:00.000Z'))
-    const due = await duePeriods(db, 'SHARD', new Date('2026-08-03T23:59:59.000Z'))
+    const due = await duePeriods(db, 'EMBER', new Date('2026-08-03T23:59:59.000Z'))
     assert.deepEqual(
       due.map((p) => p.periodStart.toISOString()),
       [DAY_1.toISOString(), DAY_2.toISOString()],
@@ -350,9 +352,9 @@ describe('duePeriods — closed days only, contiguous, oldest first', () => {
     await buy(new Date('2026-08-01T09:00:00.000Z'))
     await sql`
       insert into engagement_fee_recycles (asset_code, period_start, period_end, gross_shards, refunded_shards, recycle_bps, status)
-      values ('SHARD', ${DAY_1}, ${DAY_2}, 250, 0, 0, 'skipped')
+      values ('EMBER', ${DAY_1}, ${DAY_2}, 250, 0, 0, 'skipped')
     `
-    const due = await duePeriods(db, 'SHARD', NOW)
+    const due = await duePeriods(db, 'EMBER', NOW)
     assert.deepEqual(
       due.map((p) => p.periodStart.toISOString()),
       [DAY_2.toISOString()],
@@ -361,14 +363,14 @@ describe('duePeriods — closed days only, contiguous, oldest first', () => {
   })
 
   test('an empty deployment closes yesterday, so the pipeline is visibly alive', { skip }, async () => {
-    const due = await duePeriods(db, 'SHARD', NOW)
+    const due = await duePeriods(db, 'EMBER', NOW)
     assert.equal(due.length, 1)
     assert.equal(due[0]?.periodStart.toISOString(), DAY_2.toISOString())
   })
 
   test('the run is bounded, so a long outage does not hold the lease across a year', { skip }, async () => {
     await buy(new Date('2025-08-01T09:00:00.000Z'))
-    const due = await duePeriods(db, 'SHARD', NOW)
+    const due = await duePeriods(db, 'EMBER', NOW)
     assert.equal(due.length, 14, 'MAX_PERIODS_PER_RUN caps one pass; the rest is next run')
     assert.equal(due[0]?.periodStart.toISOString(), '2025-08-01T00:00:00.000Z')
   })
@@ -386,7 +388,7 @@ describe('runRecycle — at 0%, which is where 21 says to start', () => {
     assert.equal(summary.posted, 0)
     assert.equal(ledger.entries.length, 2, 'the two entries are the PURCHASES; the recycle posted none')
 
-    const rows = await listRecycles(db, 'SHARD', 10)
+    const rows = await listRecycles(db, 'EMBER', 10)
     assert.equal(rows.length, 2)
     for (const row of rows) {
       assert.equal(row.status, 'skipped')
@@ -396,8 +398,8 @@ describe('runRecycle — at 0%, which is where 21 says to start', () => {
     }
     // The basis is still recorded at 0%, which is the whole reason the rows are written: an
     // operator can see what the recycle WOULD have been before deciding to turn it on.
-    assert.equal(rows.find((r) => r.periodStart.getTime() === DAY_1.getTime())?.grossShards, 250n)
-    assert.equal(rows.find((r) => r.periodStart.getTime() === DAY_2.getTime())?.grossShards, 1000n)
+    assert.equal(rows.find((r) => r.periodStart.getTime() === DAY_1.getTime())?.grossShards, emberFor(250n))
+    assert.equal(rows.find((r) => r.periodStart.getTime() === DAY_2.getTime())?.grossShards, emberFor(1000n))
   })
 
   test('the day the rate is raised, money moves with no deploy', { skip }, async () => {
@@ -412,7 +414,7 @@ describe('runRecycle — at 0%, which is where 21 says to start', () => {
     const entry = ledger.entries[before]
     assert.ok(entry, 'the recycle posted an entry')
     assert.equal(entry.kind, 'transfer', 'the same kind admin-api posts for engagement.transfer')
-    assert.equal(entry.idempotencyKey, recycleIdempotencyKey('SHARD', DAY_1))
+    assert.equal(entry.idempotencyKey, recycleIdempotencyKey('EMBER', DAY_1))
 
     // Revenue OUT, treasury IN — and the account types are the ones every other service already
     // uses for these two keys. A different `type` here would be refused by the ledger's
@@ -420,13 +422,13 @@ describe('runRecycle — at 0%, which is where 21 says to start', () => {
     assert.deepEqual(
       entry.postings.map((p) => [p.direction, p.account.subject, p.account.purpose, p.account.type, p.amount]),
       [
-        ['debit', 'platform', 'fees', 'revenue', 25n],
-        ['credit', 'platform:engagement-treasury', 'treasury', 'equity', 25n],
+        ['debit', 'platform', 'fees', 'revenue', emberFor(250n) / 10n],
+        ['credit', 'platform:engagement-treasury', 'treasury', 'equity', emberFor(250n) / 10n],
       ],
     )
 
-    const posted = (await listRecycles(db, 'SHARD', 10)).find((r) => r.status === 'posted')
-    assert.equal(posted?.amountShards, 25n)
+    const posted = (await listRecycles(db, 'EMBER', 10)).find((r) => r.status === 'posted')
+    assert.equal(posted?.amountShards, emberFor(250n) / 10n)
     assert.equal(posted?.journalEntryId, entry.id)
   })
 
@@ -439,7 +441,7 @@ describe('runRecycle — at 0%, which is where 21 says to start', () => {
     assert.equal(second.posted, 0)
     assert.equal(second.skipped, 0)
     assert.equal(ledger.entries.length, after, 'one period, one entry, for ever')
-    assert.equal((await listRecycles(db, 'SHARD', 10)).length, 2)
+    assert.equal((await listRecycles(db, 'EMBER', 10)).length, 2)
   })
 
   test('a lost ledger answer leaves the row pending and the retry replays the same key', { skip }, async () => {
@@ -448,7 +450,7 @@ describe('runRecycle — at 0%, which is where 21 says to start', () => {
 
     const first = await runRecycle(deps({ adminApi: policyClient(1_000) }), NOW)
     assert.equal(first.deferred, 1, 'an unknown outcome is not a refusal')
-    const pending = (await listRecycles(db, 'SHARD', 10)).find((r) => r.periodStart.getTime() === DAY_1.getTime())
+    const pending = (await listRecycles(db, 'EMBER', 10)).find((r) => r.periodStart.getTime() === DAY_1.getTime())
     assert.equal(pending?.status, 'pending')
     assert.equal(pending?.journalEntryId, null, 'a row that never posted names no entry')
 
@@ -456,9 +458,9 @@ describe('runRecycle — at 0%, which is where 21 says to start', () => {
     // rather than one recomputed against a table that may have moved since.
     const second = await runRecycle(deps({ adminApi: policyClient(1_000) }), NOW)
     assert.equal(second.resolved, 1)
-    const settled = (await listRecycles(db, 'SHARD', 10)).find((r) => r.periodStart.getTime() === DAY_1.getTime())
+    const settled = (await listRecycles(db, 'EMBER', 10)).find((r) => r.periodStart.getTime() === DAY_1.getTime())
     assert.equal(settled?.status, 'posted')
-    assert.equal(ledger.entriesFor(recycleIdempotencyKey('SHARD', DAY_1)).length, 1)
+    assert.equal(ledger.entriesFor(recycleIdempotencyKey('EMBER', DAY_1)).length, 1)
   })
 
   test('an outstanding row is finished even when admin-api cannot be reached', { skip }, async () => {
@@ -477,7 +479,7 @@ describe('runRecycle — at 0%, which is where 21 says to start', () => {
     assert.equal(summary.posted, 1)
     assert.ok(summary.halted, 'but nothing NEW was closed')
     assert.equal(
-      (await listRecycles(db, 'SHARD', 10)).filter((r) => r.periodStart.getTime() === DAY_3.getTime()).length,
+      (await listRecycles(db, 'EMBER', 10)).filter((r) => r.periodStart.getTime() === DAY_3.getTime()).length,
       0,
       'an unread rate closes no new period',
     )
@@ -487,7 +489,7 @@ describe('runRecycle — at 0%, which is where 21 says to start', () => {
     await buy(new Date('2026-08-01T09:00:00.000Z'))
     const summary = await runRecycle(deps({ adminApi: undefined }), NOW)
     assert.match(summary.halted ?? '', /ADMIN_API_URL/)
-    assert.equal((await listRecycles(db, 'SHARD', 10)).length, 0, 'no rows, so no rate was assumed')
+    assert.equal((await listRecycles(db, 'EMBER', 10)).length, 0, 'no rows, so no rate was assumed')
   })
 
   test('a refused debit defers rather than writing the period off', { skip }, async () => {
@@ -497,7 +499,7 @@ describe('runRecycle — at 0%, which is where 21 says to start', () => {
     ledger.refuseFunds(1)
     const summary = await runRecycle(deps({ adminApi: policyClient(1_000) }), NOW)
     assert.equal(summary.deferred, 1)
-    const row = (await listRecycles(db, 'SHARD', 10)).find((r) => r.periodStart.getTime() === DAY_1.getTime())
+    const row = (await listRecycles(db, 'EMBER', 10)).find((r) => r.periodStart.getTime() === DAY_1.getTime())
     assert.equal(row?.status, 'pending')
   })
 })
@@ -507,7 +509,7 @@ describe('runRecycle — at 0%, which is where 21 says to start', () => {
 describe('claimPeriod and settleRecycle', () => {
   test('a second claim adopts the first row rather than overwriting its numbers', { skip }, async () => {
     const input = {
-      assetCode: 'SHARD' as const,
+      assetCode: 'EMBER' as const,
       periodStart: DAY_1,
       periodEnd: DAY_2,
       basis: { grossShards: 1_000n, refundedShards: 0n },
@@ -529,14 +531,14 @@ describe('claimPeriod and settleRecycle', () => {
 
   test('settling an already-settled row is a no-op, not a second entry', { skip }, async () => {
     const row = await claimPeriod(db, {
-      assetCode: 'SHARD',
+      assetCode: 'EMBER',
       periodStart: DAY_1,
       periodEnd: DAY_2,
       basis: { grossShards: 1_000n, refundedShards: 0n },
       recycleBps: 1_000,
     })
     assert.equal(await settleRecycle(deps(), row), 'posted')
-    const settled = (await listRecycles(db, 'SHARD', 1))[0]!
+    const settled = (await listRecycles(db, 'EMBER', 1))[0]!
     assert.equal(await settleRecycle(deps(), settled), 'posted')
     assert.equal(ledger.entries.length, 1)
   })
@@ -545,16 +547,16 @@ describe('claimPeriod and settleRecycle', () => {
     // A key derived from a row id does not survive the row being rewritten and derives a second
     // key on a retry — which is how the same money moves twice.
     assert.equal(
-      recycleIdempotencyKey('SHARD', DAY_1),
-      'billing:engagement-recycle:SHARD:2026-08-01T00:00:00.000Z',
+      recycleIdempotencyKey('EMBER', DAY_1),
+      'billing:engagement-recycle:EMBER:2026-08-01T00:00:00.000Z',
     )
-    assert.notEqual(recycleIdempotencyKey('SHARD', DAY_1), recycleIdempotencyKey('SHARD', DAY_2))
+    assert.notEqual(recycleIdempotencyKey('EMBER', DAY_1), recycleIdempotencyKey('EMBER', DAY_2))
   })
 })
 
 describe('feeRecyclePostings', () => {
   test('balances, and spells both accounts the way the rest of the estate spells them', () => {
-    const postings = feeRecyclePostings({ assetCode: 'SHARD', amount: 4_200n })
+    const postings = feeRecyclePostings({ assetCode: 'EMBER', amount: 4_200n })
     const debits = postings.filter((p) => p.direction === 'debit').reduce((n, p) => n + p.amount, 0n)
     const credits = postings.filter((p) => p.direction === 'credit').reduce((n, p) => n + p.amount, 0n)
     assert.equal(debits, credits)

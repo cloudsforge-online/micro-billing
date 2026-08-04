@@ -537,6 +537,121 @@ export const MIGRATIONS: readonly Migration[] = [
         where status = 'pending';
     `,
   },
+
+  {
+    version: 11,
+    name: 'retire_shard_prices',
+    up: `
+      -- ════════════════════════════════════════════════════════════════════════════════════════
+      -- SHARDS OUT. The catalogue becomes durable in USD; EMBER is settled at purchase time.
+      --
+      -- ── WHY USD AND NOT EMBER ───────────────────────────────────────────────────────────────
+      --
+      -- The owner's decision (docs/ecosystem/15 §3.2, "Pricing basis, decided 2026-08-04") is that
+      -- stated USD does not move and the unit changes. A price row denominated in EMBER cannot
+      -- honour that, for a measured reason: there is no market price for EMBER. Hearth has no
+      -- exchange listing, so micro-pricing carries an ADMINISTERED number for it
+      -- (pricing/src/rates.ts:55, seeded at 0.25 USD in pricing/src/migrations.ts:185) — a figure
+      -- an operator typed. Store EMBER here and every future edit to that figure silently
+      -- restates the whole catalogue's dollar prices, with no migration and no record. The USD
+      -- figure is the durable one; how much EMBER it buys is a settlement-time question.
+      --
+      -- USD is not a new idea in this estate and is not a second internal unit: it is already a
+      -- LedgerAssetCode (contracts/packages/money/src/index.ts:66, "administered prices, invoices,
+      -- payout statements") and the live ledger already holds 18 USD accounts. It never appears in
+      -- a posting from this service — see the settlement note below.
+      --
+      -- ── WHY THE INTEGER DOES NOT MOVE, AND WHY THAT IS THE WHOLE SAFETY ARGUMENT ─────────────
+      --
+      -- SHARD has decimals 0; USD is held as cents, decimals 2; the documented peg is 100 Shards
+      -- to the dollar. 100 Shards = 100 cents, so ONE SHARD IS EXACTLY ONE CENT and the
+      -- re-denomination is the identity on the stored number: 250 Shards was $2.50 and 250 cents
+      -- is $2.50. Nothing is multiplied, divided or rounded, so there is no scale change to get
+      -- wrong.
+      --
+      -- Contrast the alternative that was rejected: relabelling these rows 'EMBER' would leave the
+      -- integer 250 to be read at 18 decimals, i.e. 250 wei = 0.00000000000000025 EMBER — a price
+      -- moved by eighteen orders of magnitude by an UPDATE that touched only a text column. That
+      -- is the silent scale change this migration exists to not be.
+      --
+      -- ── SUPERSEDED, NOT CONVERTED, NOT DELETED ──────────────────────────────────────────────
+      --
+      -- The SHARD rows are retired in place rather than updated or removed. purchases.price_id
+      -- and subscriptions.price_id are foreign keys into this table, so a row records what a
+      -- past purchase actually cost; rewriting its asset_code would retroactively restate history
+      -- and deleting it would break the reference. status='retired' is the table's own existing
+      -- vocabulary for this (prices_status_check), and the partial unique index
+      -- prices_active_per_asset_idx only covers status='active', so the new USD rows insert
+      -- alongside them without collision.
+      --
+      -- No money is destroyed here because none is held here: this table holds prices, not
+      -- balances. The 132,000 units of real SHARD liability live in micro-ledger and are NOT
+      -- touched by this migration — they are drained separately, and until they are, SHARD stays
+      -- in contracts-chain's AssetCode so reconciliation can keep supervising them.
+      -- ════════════════════════════════════════════════════════════════════════════════════════
+
+      update prices set status = 'retired' where asset_code = 'SHARD' and status = 'active';
+
+      insert into prices (product_id, asset_code, unit_amount, interval, interval_count, status)
+      select p.product_id, 'USD', p.unit_amount, p.interval, p.interval_count, 'active'
+        from prices p
+       where p.asset_code = 'SHARD'
+         and p.status = 'retired'
+         -- Idempotent, and re-runnable against a deployment that already has a USD price for the
+         -- product: never a second active row for the same product.
+         and not exists (
+           select 1 from prices q
+            where q.product_id = p.product_id and q.asset_code = 'USD' and q.status = 'active'
+         );
+
+      -- ── THE GUARD ───────────────────────────────────────────────────────────────────────────
+      -- A comment does not stop an INSERT. This does: no NEW active Shard price can exist, ever,
+      -- in any deployment, whatever the application code believes. Retired rows are still
+      -- permitted because history must remain readable.
+      alter table prices
+        add constraint prices_no_new_shard
+        check (asset_code <> 'SHARD' or status = 'retired');
+
+      -- ── WHAT A PURCHASE RECORDS ─────────────────────────────────────────────────────────────
+      --
+      -- Two amounts now, because there are two: the price (USD cents, durable, what the customer
+      -- was quoted) and the charge (EMBER wei, what actually left their balance). Recording only
+      -- one loses something a refund needs — a refund must return the EMBER that was TAKEN, not
+      -- whatever today's administered rate says $2.50 is worth, or a customer refunded during a
+      -- rate change is refunded the wrong amount.
+      --
+      -- rate_usd_scaled is the third column for the same reason: it makes the arithmetic
+      -- auditable after the fact. Without it, amount and price_amount are two numbers with no
+      -- stated relationship, and nobody can tell a rate change from a bug.
+      alter table purchases
+        add column if not exists price_asset_code text,
+        add column if not exists price_amount     numeric(78, 0),
+        add column if not exists rate_usd_scaled  numeric(78, 0);
+
+      -- Backfill. Every purchase that already exists was charged in the same asset it was priced
+      -- in, at no conversion — that is what a Shard price and a Shard debit MEANT. Recording it as
+      -- a 1:1 conversion is therefore the truth about those rows rather than a convenient default.
+      update purchases
+         set price_asset_code = asset_code,
+             price_amount     = amount,
+             rate_usd_scaled  = null
+       where price_asset_code is null;
+
+      alter table purchases
+        alter column price_asset_code set not null,
+        alter column price_amount     set not null;
+
+      alter table purchases add constraint purchases_price_amount_check check (price_amount >= 0);
+
+      -- A positive price must never have been charged as nothing. This is the BigInt('') = 0n
+      -- hazard given a home in the schema: the application refuses a zero conversion
+      -- (contracts-chain's coinAmountForUsdCents), and so does the database, because the
+      -- application is one deploy away from being wrong and the row outlives the deploy.
+      alter table purchases
+        add constraint purchases_no_free_lunch
+        check (price_amount = 0 or amount > 0);
+    `,
+  },
 ]
 
 /**

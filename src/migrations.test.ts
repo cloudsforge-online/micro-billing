@@ -167,3 +167,72 @@ test('the seeded catalogue includes the two products whose defects this service 
   assert.match(sql, /'season\.pass\.s1'.*'one_off',\s*'platform',\s*90/)
   assert.match(sql, /'world\.private\.small'.*'one_off',\s*'title',\s*30/)
 })
+
+/* ═══════════════════════════════════════════ migration 11 — Shards out, USD in, EMBER settled */
+
+test('no migration creates a new active Shard price, and one forbids it outright', () => {
+  // The constraint, not a convention. It refuses the row whatever the application believes, and
+  // it caught `resetBilling` replaying migration 9's seed on the first run after it was added.
+  assert.match(statementsOf(sql), /constraint prices_no_new_shard/)
+  assert.match(statementsOf(sql), /check \(asset_code <> 'SHARD' or status = 'retired'\)/)
+})
+
+test('the Shard prices are superseded, never rewritten and never deleted', () => {
+  const eleven = MIGRATIONS.find((m) => m.version === 11)?.up ?? ''
+  const statements = statementsOf(eleven)
+
+  // Retired in place. `purchases.price_id` and `subscriptions.price_id` reference these rows, so a
+  // past purchase must keep pointing at a row that says what it actually cost.
+  assert.match(statements, /update prices set status = 'retired' where asset_code = 'SHARD'/)
+
+  // Never destroyed. A DELETE here would drop the only record of what a historical purchase was
+  // priced at, and the FK would refuse it anyway — loudly in CI, or quietly never exercised.
+  assert.equal(/delete\s+from\s+prices/i.test(statements), false, 'migration 11 deletes a price row')
+
+  // Never re-labelled. This is the eighteen-orders-of-magnitude bug: SHARD has decimals 0 and
+  // EMBER has 18, so `update prices set asset_code='EMBER'` would read a stored 250 as 250 wei.
+  assert.equal(
+    /update\s+prices\s+set\s+asset_code/i.test(statements),
+    false,
+    'migration 11 rewrites an asset code in place — that is a silent scale change',
+  )
+})
+
+test('the re-denomination is the identity on the stored integer', () => {
+  // The whole safety argument, asserted rather than trusted to the prose. The new USD rows are
+  // built by SELECTing `unit_amount` from the retired Shard rows — no multiplication, no division,
+  // no rounding — because at the documented 100-Shards-to-the-dollar peg one Shard IS one cent.
+  const eleven = statementsOf(MIGRATIONS.find((m) => m.version === 11)?.up ?? '')
+  assert.match(eleven, /select p\.product_id, 'USD', p\.unit_amount,/)
+  // No arithmetic anywhere near the amount.
+  assert.equal(
+    /unit_amount\s*[*\/+-]/.test(eleven),
+    false,
+    'the conversion applies arithmetic to a stored price',
+  )
+})
+
+test('a purchase records the price, the charge AND the rate between them', () => {
+  const eleven = statementsOf(MIGRATIONS.find((m) => m.version === 11)?.up ?? '')
+  for (const column of ['price_asset_code', 'price_amount', 'rate_usd_scaled']) {
+    assert.match(eleven, new RegExp(`add column if not exists ${column}`), `${column} is missing`)
+  }
+  // Without the rate, `amount` and `price_amount` are two numbers with no stated relationship and
+  // nobody can tell a rate change from a bug.
+  assert.match(eleven, /rate_usd_scaled\s+numeric\(78, 0\)/)
+})
+
+test('a positive price may never have been charged as nothing', () => {
+  // The BigInt('') = 0n hazard, given a home in the schema. The application refuses a zero
+  // conversion too, but the application is one deploy away from being wrong and the row outlives
+  // the deploy.
+  assert.match(statementsOf(sql), /constraint purchases_no_free_lunch/)
+  assert.match(statementsOf(sql), /check \(price_amount = 0 or amount > 0\)/)
+})
+
+test('SPARK is not an asset code in any migration', () => {
+  // A Spark is a display denomination of EMBER. The ledger's balancing invariant is enforced per
+  // asset code, so a second code for the same money could drift from it with nothing able to
+  // notice. `contracts-chain` keeps the same guard over its own source.
+  assert.equal(/'SPARK'/.test(sql), false, "'SPARK' appears as an asset code in a migration")
+})

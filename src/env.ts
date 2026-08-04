@@ -17,6 +17,7 @@
 
 import { hostname } from 'node:os'
 import type { LedgerAssetCode } from '@cloudsforge/contracts-money'
+import type { IssuableAssetCode } from '@cloudsforge/contracts-chain'
 
 /**
  * The service's own name. A constant rather than a variable: it is a property of the repository,
@@ -162,10 +163,33 @@ export interface Env {
    */
   readonly ledgerDeadlineMs: number
   /**
-   * What a purchase is denominated in. SHARD, because Shards are the platform's unit of account
-   * and are funded by on-chain deposit only — there is no fiat path to configure.
+   * What the catalogue is PRICED in. USD, held as cents.
+   *
+   * The durable figure, because there is no market price for EMBER to make an EMBER price durable
+   * against — see `migrations.ts` version 11 and `pricingclient.ts`. USD never reaches a posting.
+   *
+   * Not configurable, for the same reason the old `purchaseAsset` was not: the price rows in the
+   * database are denominated in one thing, and an environment variable that disagreed with them
+   * would find no active price and fail every purchase with "no active X price".
    */
-  readonly purchaseAsset: LedgerAssetCode
+  readonly priceAsset: LedgerAssetCode
+  /**
+   * What a purchase is SETTLED in — what actually leaves the customer's balance. EMBER.
+   *
+   * Was `SHARD`. Shards sat outside the estate's central guarantee (no balance may exist that the
+   * chain does not back), which is why they are gone from this path: a purchase now debits an
+   * asset a chain backs, so the money it moves is money reconciliation can see.
+   *
+   * Typed `IssuableAssetCode`, not `LedgerAssetCode`. That excludes retired assets at COMPILE
+   * time, so restoring `'SHARD'` here — the single edit that would put this service back to
+   * minting unbacked liability — does not build. `USD` is excluded by the same type for a
+   * different reason: it is a unit of account with no chain and no custody, so posting it would
+   * recreate the Shard defect under a more respectable name.
+   */
+  readonly settlementAsset: IssuableAssetCode
+  /** Where micro-pricing is, for the USD→EMBER rate. Required: a purchase cannot be priced without it. */
+  readonly pricingBaseUrl: string
+  readonly pricingDeadlineMs: number
   /** How long an idempotency key is honoured. Must outlive every caller's retry horizon. */
   readonly idempotencyTtlDays: number
   /**
@@ -203,6 +227,14 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     throw new EnvError(`BILLING_LEDGER_URL must be an absolute http(s) URL (got ${ledgerBaseUrl})`)
   }
 
+  // REQUIRED, unlike ADMIN_API_URL. The recycle is an optional programme; pricing is on the
+  // purchase path, so an unset URL is not "this deployment does without" — it is every purchase
+  // failing at the moment of payment, which is a refusal that belongs at boot naming the variable.
+  const pricingBaseUrl = required(source, 'BILLING_PRICING_URL')
+  if (!/^https?:\/\//i.test(pricingBaseUrl)) {
+    throw new EnvError(`BILLING_PRICING_URL must be an absolute http(s) URL (got ${pricingBaseUrl})`)
+  }
+
   // Optional as a pair. Set neither (no engagement programme here) or set both — a URL with no
   // token would boot happily and then fail every hour inside a job, which is the failure mode
   // this file exists to convert into a refusal at startup naming the variable.
@@ -234,7 +266,10 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
       (source['BILLING_LEDGER_TOKEN']?.trim() ?? '').length > 0 ||
       (source['BILLING_ADMIN_API_TOKEN']?.trim() ?? '').length > 0,
     ledgerDeadlineMs: integer(source, 'BILLING_LEDGER_DEADLINE_MS', 5_000, 250, 30_000),
-    purchaseAsset: 'SHARD',
+    priceAsset: 'USD',
+    settlementAsset: 'EMBER',
+    pricingBaseUrl,
+    pricingDeadlineMs: integer(source, 'BILLING_PRICING_DEADLINE_MS', 5_000, 250, 30_000),
     idempotencyTtlDays: integer(source, 'BILLING_IDEMPOTENCY_TTL_DAYS', 30, 1, 3_650),
     adminApiBaseUrl,
     adminApiDeadlineMs: integer(source, 'BILLING_ADMIN_API_DEADLINE_MS', 5_000, 250, 30_000),

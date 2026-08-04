@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { assertIssuable, isRetiredAsset } from '@cloudsforge/contracts-chain'
 
 /**
  * A valid environment, applied to the process before `./env.ts` is imported.
@@ -15,6 +16,7 @@ const VALID: Record<string, string> = {
   IDENTITY_ISSUER: 'http://identity.test',
   OUTBOX_SIGNING_SECRET: 'K2sN4vQ8xR1wB6tY9zL3mF7hC5jD0pA4',
   BILLING_LEDGER_URL: 'http://ledger.test:4000',
+  BILLING_PRICING_URL: 'http://pricing.test:4000',
 }
 for (const [key, value] of Object.entries(VALID)) process.env[key] = value
 
@@ -63,10 +65,38 @@ test('the identity credential is a secret, so a placeholder is refused', () => {
   assert.throws(() => loadEnv({ ...BASE, OUTBOX_SIGNING_SECRET: 'placeholder' }), /known placeholder/)
 })
 
-test('purchases are denominated in SHARD, which is not configurable', () => {
-  // Payments are crypto-native: Shards are funded by on-chain deposit only, and there is no fiat
-  // path to configure. Making the asset a variable would invite one.
-  assert.equal(loadEnv(BASE).purchaseAsset, 'SHARD')
+test('purchases are priced in USD and settled in EMBER, neither configurable', () => {
+  // Payments are crypto-native and settlement is on-chain-backed: EMBER, not the retired SHARD,
+  // because a Shard balance was liability no chain stood behind. Making either a variable would
+  // invite a deployment that priced in one thing and charged in another.
+  //
+  // USD is the PRICE unit only. It never reaches a posting — see `purchases.ts`, where
+  // `purchasePostings` is given `settlementAsset` — so this does not reintroduce the Shard defect
+  // under a different name.
+  assert.equal(loadEnv(BASE).priceAsset, 'USD')
+  assert.equal(loadEnv(BASE).settlementAsset, 'EMBER')
+})
+
+test('the settlement asset cannot be a retired one — the type is the enforcement', () => {
+  // `settlementAsset` is `IssuableAssetCode`, i.e. `Exclude<AssetCode, 'SHARD'>`. There is no
+  // runtime branch to exercise here because there is no runtime branch: restoring 'SHARD' in
+  // env.ts does not compile. What IS checked is that the value never became a retired asset by
+  // some other route, and that contracts-chain agrees about which assets those are.
+  assert.equal(isRetiredAsset(loadEnv(BASE).settlementAsset), false)
+  assert.equal(isRetiredAsset('SHARD'), true)
+  assert.throws(() => assertIssuable('SHARD'), /retired/)
+})
+
+test('pricing is required, because a purchase cannot be priced without it', () => {
+  // Unlike ADMIN_API_URL, which is optional and means "this deployment runs no engagement
+  // programme". An absent pricing URL does not mean a deployment does without pricing; it means
+  // every purchase fails at the moment of payment. That belongs at boot, naming the variable.
+  const { BILLING_PRICING_URL: _omitted, ...without } = BASE
+  assert.throws(() => loadEnv(without), /BILLING_PRICING_URL/)
+  assert.throws(
+    () => loadEnv({ ...BASE, BILLING_PRICING_URL: 'pricing:4000' }),
+    /must be an absolute http\(s\) URL/,
+  )
 })
 
 test('the ledger deadline is bounded at both ends', () => {

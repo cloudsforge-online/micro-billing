@@ -27,8 +27,11 @@ import {
   resetBilling,
   skip,
   type FakeLedger,
+  emberFor,
+  fakePricing,
 } from './testsupport.ts'
 import type { Db } from './outbox.ts'
+import type { PurchaseDeps } from './purchases.ts'
 
 /**
  * A verifier keyed on the token text, so a test names the authority it wants.
@@ -86,8 +89,14 @@ before(async () => {
         return ledger
       },
       producer: 'billing',
-      assetCode: 'SHARD',
-    } as never,
+      priceAsset: 'USD',
+      settlementAsset: 'EMBER',
+      pricing: fakePricing(),
+      // No `as never`. The cast that used to be here is why splitting `assetCode` into a price
+      // asset and a settlement asset typechecked clean and then 500'd every purchase route at
+      // runtime: `as never` silences the one check that would have named the missing field.
+      // The getter above is the only reason a cast was ever reached for, and it does not need one.
+    } satisfies PurchaseDeps,
   })
   await new Promise<void>((resolve) => server.listen(0, () => resolve()))
   lifecycle.markReady()
@@ -189,7 +198,7 @@ test('a purchase returns 201 and the entitlement it granted', { skip }, async ()
   assert.equal(response.status, 201)
   const purchase = (response.body as unknown as { purchase: Record<string, unknown> }).purchase
   const entitlement = (response.body as unknown as { entitlement: Record<string, unknown> }).entitlement
-  assert.equal(purchase['amount'], '250')
+  assert.equal(purchase['amount'], emberFor(250n).toString())
   assert.equal(entitlement['active'], true)
   assert.equal(entitlement['scope'], 'platform')
   assert.equal(typeof entitlement['quantity'], 'string')

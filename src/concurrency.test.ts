@@ -25,6 +25,7 @@ import {
   resetBilling,
   skip,
   type FakeLedger,
+  fakePricing,
 } from './testsupport.ts'
 import type { Db } from './outbox.ts'
 
@@ -51,7 +52,7 @@ beforeEach(async () => {
 })
 
 function deps(): PurchaseDeps {
-  return { sql: sql as unknown as Db, ledger, producer: 'billing', assetCode: 'SHARD' }
+  return { sql: sql as unknown as Db, ledger, producer: 'billing', priceAsset: 'USD', settlementAsset: 'EMBER', pricing: fakePricing() }
 }
 
 function request(overrides: Partial<PurchaseRequest> = {}): PurchaseRequest {

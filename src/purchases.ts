@@ -27,7 +27,25 @@
  */
 
 import type { EntryMetadata, LedgerAssetCode } from '@cloudsforge/contracts-money'
+import { WEI_PER_SPARK, type IssuableAssetCode } from '@cloudsforge/contracts-chain'
+import type { PricingClient } from './pricingclient.ts'
 import { expiryFor, resolveTarget, type ProductRecord, type PriceRecord } from './catalogue.ts'
+
+/**
+ * A charge in Sparks, for display, or null when it is not a whole number of them.
+ *
+ * A Spark is 10⁻⁶ EMBER — a display denomination of one asset, never a second asset code. The
+ * distinction is not pedantry: the ledger's balancing invariant is enforced per asset code
+ * (`ledger/src/migrations.ts:302-313`), so a second code for the same money would let its two
+ * halves drift apart with nothing able to notice. Nothing in this service posts a Spark, and
+ * `contracts-chain` greps its own source to keep the string out of the asset union entirely.
+ *
+ * Null rather than rounded. A settlement amount is whatever the rate produced and will usually
+ * carry sub-Spark wei; printing a rounded figure would show a price that is not the price.
+ */
+export function sparksForDisplay(wei: bigint): string | null {
+  return wei % WEI_PER_SPARK === 0n ? (wei / WEI_PER_SPARK).toString() : null
+}
 import {
   grantEntitlement,
   parseScope,
@@ -68,7 +86,21 @@ export interface PurchaseDeps {
   readonly sql: Db
   readonly ledger: LedgerClient
   readonly producer: string
-  readonly assetCode: LedgerAssetCode
+  /**
+   * What the catalogue is priced in — `USD`, held as cents. Selects the price row; never posted.
+   */
+  readonly priceAsset: LedgerAssetCode
+  /**
+   * What the customer is actually charged in — `EMBER`. The only asset that reaches a posting.
+   *
+   * The two were one field (`assetCode`) while the price and the charge were the same Shard
+   * amount. Separating them is the whole of this change: the price is durable in dollars and the
+   * charge is settled in an asset a chain backs, so nothing this service posts can create a
+   * balance the chain does not back.
+   */
+  readonly settlementAsset: IssuableAssetCode
+  /** Reads the USD→EMBER rate. Fails the purchase rather than guessing — see `pricingclient.ts`. */
+  readonly pricing: PricingClient
   /** Injected so a test can grant at a controlled instant and assert on an expiry. */
   readonly now?: () => Date
 }
@@ -94,8 +126,26 @@ export interface PurchaseResponse {
     readonly sku: string
     readonly scope: string
     readonly quantity: string
+    /** The settlement asset — what was charged. `EMBER`. */
     readonly assetCode: string
+    /** The charge, in the settlement asset's smallest units. Wei, for EMBER. */
     readonly amount: string
+    /**
+     * The same charge in Sparks, for display only.
+     *
+     * A Spark is 10⁻⁶ EMBER. It is a DISPLAY DENOMINATION and never an asset code — see
+     * `contracts-chain`, which greps its own source to keep it that way. It is a string here for
+     * the same reason `amount` is: a JSON number cannot hold wei.
+     *
+     * Null when the charge is not a whole number of Sparks. Rounding it for display would print a
+     * price that is not the price; a client that wants a rounded figure can round it knowingly.
+     */
+    readonly amountSparks: string | null
+    /** What the customer was quoted: `USD`, and cents. The durable figure. */
+    readonly priceAssetCode: string
+    readonly priceAmount: string
+    /** The rate the conversion used, at `RATE_SCALE`. Null for a purchase made before migration 11. */
+    readonly rateUsdScaled: string | null
     readonly journalEntryId: string
     readonly status: string
     readonly createdAt: string
@@ -112,6 +162,9 @@ interface PurchaseRow {
   readonly quantity: string
   readonly asset_code: string
   readonly amount: string
+  readonly price_asset_code: string
+  readonly price_amount: string
+  readonly rate_usd_scaled: string | null
   readonly scope: string
   readonly journal_entry_id: string
   readonly status: string
@@ -169,10 +222,36 @@ export async function purchase(
   const target = await resolveTarget(deps.sql, {
     ...(request.sku !== undefined ? { sku: request.sku } : {}),
     ...(request.priceId !== undefined ? { priceId: request.priceId } : {}),
-    assetCode: deps.assetCode,
+    // The PRICE asset, not the settlement asset. The catalogue is denominated in USD; asking for
+    // an EMBER price row would find nothing, because there is deliberately no EMBER price row.
+    assetCode: deps.priceAsset,
   })
   const scope = scopeFor(target.product, request.scope)
-  const amount = target.price.unitAmount * request.quantity
+
+  // The price, in the durable unit: US cents.
+  const priceAmount = target.price.unitAmount * request.quantity
+
+  // The charge, in the settled asset. Read OUTSIDE the idempotency claim and before the ledger
+  // call, deliberately: it is a network read that can fail, and failing it here leaves nothing to
+  // unwind. Inside `run` it would sit in the same transaction as the posting, holding a database
+  // connection open across a second upstream.
+  //
+  // A failure here refuses the purchase. That is the fail-closed choice argued in
+  // `pricingclient.ts`: you cannot charge somebody in a currency you cannot price, and the only
+  // alternative to refusing is guessing how much of their money to take.
+  const quote = await deps.pricing.quote(deps.settlementAsset, priceAmount)
+  const amount = quote.amount
+
+  // Belt and braces over `coinAmountForUsdCents`, which already refuses this. A positive price
+  // that settles to nothing is a free purchase, and the entitlement is granted in the same
+  // transaction as the posting — so a zero here would hand over the goods for a balanced entry
+  // that moved no money. Migration 11 refuses the row as well (`purchases_no_free_lunch`).
+  if (priceAmount > 0n && amount <= 0n) {
+    throw new PurchaseValidationError(
+      `a price of ${priceAmount} cents settled to ${amount} — refusing to charge nothing for something`,
+    )
+  }
+
   const now = deps.now?.() ?? new Date()
 
   return withIdempotency<PurchaseResponse>(deps.sql, {
@@ -196,7 +275,7 @@ export async function purchase(
           quantity: request.quantity.toString(),
           ...(request.metadata ?? {}),
         },
-        postings: purchasePostings({ subject, assetCode: deps.assetCode, amount }),
+        postings: purchasePostings({ subject, assetCode: deps.settlementAsset, amount }),
       })
 
       const response = await recordPurchase(tx, {
@@ -204,8 +283,11 @@ export async function purchase(
         product: target.product,
         price: target.price,
         quantity: request.quantity,
-        assetCode: deps.assetCode,
+        assetCode: deps.settlementAsset,
         amount,
+        priceAssetCode: deps.priceAsset,
+        priceAmount,
+        rateUsdScaled: quote.usdScaled,
         scope,
         journalEntryId: entry.id,
         idempotencyKey: storedKey,
@@ -230,6 +312,9 @@ interface RecordInput {
   readonly quantity: bigint
   readonly assetCode: LedgerAssetCode
   readonly amount: bigint
+  readonly priceAssetCode: LedgerAssetCode
+  readonly priceAmount: bigint
+  readonly rateUsdScaled: bigint
   readonly scope: EntitlementScope
   readonly journalEntryId: string
   readonly idempotencyKey: string
@@ -253,15 +338,19 @@ async function recordPurchase(tx: Tx, input: RecordInput): Promise<PurchaseRespo
 
   const rows = await tx<PurchaseRow[]>`
     insert into purchases (
-      subject, product_id, price_id, quantity, asset_code, amount, scope,
+      subject, product_id, price_id, quantity, asset_code, amount,
+      price_asset_code, price_amount, rate_usd_scaled, scope,
       journal_entry_id, idempotency_key, correlation_id, actor
     )
     values (
       ${input.subject}, ${input.product.id}, ${input.price.id}, ${input.quantity.toString()}::numeric,
-      ${input.assetCode}, ${input.amount.toString()}::numeric, ${input.scope},
+      ${input.assetCode}, ${input.amount.toString()}::numeric,
+      ${input.priceAssetCode}, ${input.priceAmount.toString()}::numeric,
+      ${input.rateUsdScaled.toString()}::numeric, ${input.scope},
       ${input.journalEntryId}, ${input.idempotencyKey}, ${input.correlationId}, ${input.actor}
     )
-    returning id, subject, product_id, price_id, quantity, asset_code, amount, scope,
+    returning id, subject, product_id, price_id, quantity, asset_code, amount,
+              price_asset_code, price_amount, rate_usd_scaled, scope,
               journal_entry_id, status, refund_entry_id, created_at
   `
   const purchaseRow = rows[0]
@@ -318,6 +407,13 @@ async function recordPurchase(tx: Tx, input: RecordInput): Promise<PurchaseRespo
       quantity: BigInt(purchaseRow.quantity).toString(),
       assetCode: purchaseRow.asset_code,
       amount: BigInt(purchaseRow.amount).toString(),
+      amountSparks: sparksForDisplay(BigInt(purchaseRow.amount)),
+      priceAssetCode: purchaseRow.price_asset_code,
+      priceAmount: BigInt(purchaseRow.price_amount).toString(),
+      // `?? null`, never `?? '0'`. A missing rate means "this purchase predates the conversion",
+      // and a zero would assert something false about the arithmetic that produced the charge.
+      rateUsdScaled:
+        purchaseRow.rate_usd_scaled === null ? null : BigInt(purchaseRow.rate_usd_scaled).toString(),
       journalEntryId: purchaseRow.journal_entry_id,
       status: purchaseRow.status,
       createdAt: purchaseRow.created_at.toISOString(),

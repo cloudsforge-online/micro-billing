@@ -27,6 +27,7 @@ import { createServer, registerServiceMetrics } from './server.ts'
 import { registerHandlers, rescheduleRecurring, seedRecurring, type JobDeps } from './jobs.ts'
 import { buildUpstreams } from './upstreams.ts'
 import type { PurchaseDeps } from './purchases.ts'
+import { httpPricingClient } from './pricingclient.ts'
 import type { Db } from './outbox.ts'
 
 // 1. Environment. Importing `./env.ts` validated it; a missing or placeholder secret has already
@@ -154,11 +155,21 @@ if (adminApi === undefined) {
 // deliberately, so one bad minute in identity does not empty every balancer in the estate.
 lifecycle.addProbe(serviceTokenProbe(identityTokens))
 
+// Unauthenticated, unlike `ledger` and `adminApi`, so it is built here rather than in
+// `upstreams.ts` — that module exists for the service-token wiring and this peer has none. The
+// rate board is public by design (`pricing/src/server.ts:9`).
+const pricing = httpPricingClient({
+  baseUrl: env.pricingBaseUrl,
+  deadlineMs: env.pricingDeadlineMs,
+})
+
 const purchases: PurchaseDeps = {
   sql: sql as unknown as Db,
   ledger,
   producer: SERVICE,
-  assetCode: env.purchaseAsset,
+  priceAsset: env.priceAsset,
+  settlementAsset: env.settlementAsset,
+  pricing,
 }
 
 // 6. Routes. Constructed after the Lifecycle so the health handlers report real state, and after
@@ -189,7 +200,10 @@ const jobDeps: JobDeps = {
   metrics,
   ledger,
   producer: SERVICE,
-  assetCode: env.purchaseAsset,
+  // The SETTLEMENT asset. The fee recycle moves platform revenue out of `(platform, X, fees)`,
+  // which is the account `purchasePostings` credits — so it must name the asset purchases are
+  // actually settled in, or the recycle would look for revenue in an account nothing credits.
+  assetCode: env.settlementAsset,
   signingSecret: env.outboxSigningSecret,
   idempotencyTtlDays: env.idempotencyTtlDays,
   ...(adminApi ? { adminApi } : {}),

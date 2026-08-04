@@ -23,6 +23,8 @@
 
 import postgres from 'postgres'
 import { migrate, type Sql as DbSql } from '@cloudsforge/db'
+import { chainSpec, coinAmountForUsdCents } from '@cloudsforge/contracts-chain'
+import { RateUnavailableError, type PricingClient } from './pricingclient.ts'
 import { MIGRATIONS } from './migrations.ts'
 import {
   InsufficientFundsError,
@@ -84,7 +86,42 @@ export async function resetBilling(sql: postgres.Sql): Promise<void> {
   await sql.unsafe(`truncate ${ALL_TABLES} restart identity cascade`)
   const seed = MIGRATIONS.find((m) => m.name === 'seed_catalogue')
   if (!seed) throw new Error('the catalogue seed migration is missing')
-  await sql.unsafe(seed.up)
+  await sql.unsafe(redenominated(seed.up))
+}
+
+/**
+ * Migration 9's seed, as migration 11 leaves it: priced in USD cents rather than Shards.
+ *
+ * ── WHY THIS TRANSFORM EXISTS AND IS NOT A HACK ───────────────────────────────────────────────
+ *
+ * `resetBilling` truncates and replays the seed to give each test file a known catalogue. Migration
+ * 9 is immutable — `@cloudsforge/db` checksums it — so its text still says `'SHARD'`, and migration
+ * 11 added a CHECK (`prices_no_new_shard`) that refuses a new ACTIVE Shard price. Replaying the
+ * seed verbatim therefore now fails, and it SHOULD: the constraint caught this fixture on the first
+ * run after it was added, which is the constraint working.
+ *
+ * The transform is the same one migration 11 argues at length, applied to text instead of rows: at
+ * the documented peg of 100 Shards to the dollar, one Shard is exactly one cent, so ONLY the asset
+ * code changes and the integer stays put. 250 Shards was $2.50; 250 cents is $2.50.
+ *
+ * Substituting the code rather than writing a fresh seed here is deliberate — a hand-written copy
+ * of the product list would drift from migration 9 the first time a SKU is added, and a fixture
+ * that disagrees with the schema is worse than no fixture. `migrations.test.ts` asserts the
+ * post-reset catalogue holds no active Shard price and the expected USD amounts, so if this
+ * transform ever stops matching what migration 11 does, that test fails rather than this quietly
+ * seeding something production would never contain.
+ */
+function redenominated(seedSql: string): string {
+  // The seed names the asset exactly once, in the prices insert. Asserted rather than assumed:
+  // a silent zero-replacement would seed an empty catalogue and every test would fail obscurely.
+  const occurrences = seedSql.match(/'SHARD'/g)?.length ?? 0
+  if (occurrences !== 1) {
+    throw new Error(
+      `expected exactly one 'SHARD' literal in the catalogue seed, found ${occurrences} — ` +
+        'migration 9 changed shape, so this transform can no longer be trusted',
+    )
+  }
+  return seedSql.replace("'SHARD'", "'USD'")
 }
 
 /* ------------------------------------------------------------------ fixtures */
@@ -217,4 +254,41 @@ export function fakeLedger(): FakeLedger {
       }))
     },
   }
+}
+
+/**
+ * A pricing client that converts at a fixed, stated rate.
+ *
+ * The default is EMBER's real administered price — 0.25 USD, `pricing/src/migrations.ts:185` —
+ * so a test's arithmetic is the arithmetic production will do, not a rounder number chosen to make
+ * the assertions tidy. At 0.25 USD, $2.50 is exactly 10 EMBER.
+ *
+ * It calls the real `coinAmountForUsdCents` rather than reimplementing the conversion, because a
+ * fake that does its own maths is a fake that can agree with a broken implementation.
+ */
+export function fakePricing(options: { usdScaled?: bigint; fail?: string } = {}): PricingClient & {
+  readonly calls: () => number
+} {
+  const usdScaled = options.usdScaled ?? 250_000n
+  let calls = 0
+  return {
+    calls: () => calls,
+    async quote(asset, cents) {
+      calls += 1
+      if (options.fail) throw new RateUnavailableError(options.fail)
+      return { usdScaled, amount: coinAmountForUsdCents(cents, chainSpec(asset).decimals, usdScaled) }
+    },
+  }
+}
+
+/**
+ * What a price in US cents settles to in EMBER wei, at `fakePricing`'s default rate.
+ *
+ * Tests assert against this rather than against a copied literal so that the expectation and the
+ * conversion cannot disagree — and so that the numbers in a test stay readable as the DOLLAR
+ * amounts they came from. `emberFor(250n)` says "the $2.50 cape" in a way that
+ * `10000000000000000000n` does not.
+ */
+export function emberFor(cents: bigint, usdScaled = 250_000n): bigint {
+  return coinAmountForUsdCents(cents, chainSpec('EMBER').decimals, usdScaled)
 }

@@ -31,6 +31,8 @@ import {
   resetBilling,
   skip,
   type FakeLedger,
+  fakePricing,
+  emberFor,
 } from './testsupport.ts'
 import type { Db } from './outbox.ts'
 
@@ -63,7 +65,9 @@ function deps(overrides: Partial<PurchaseDeps> = {}): PurchaseDeps {
     sql: db,
     ledger,
     producer: 'billing',
-    assetCode: 'SHARD',
+    priceAsset: 'USD',
+    settlementAsset: 'EMBER',
+    pricing: fakePricing(),
     now: () => NOW,
     ...overrides,
   }
@@ -99,7 +103,7 @@ test('A PURCHASE POSTS EXACTLY ONE LEDGER ENTRY, and billing holds no balance', 
   // The purchase row names the entry that moved the money. There is no path that creates one
   // without it, which is what makes "billing holds no balance" checkable rather than a claim.
   assert.equal(outcome.result.purchase.journalEntryId, ledger.entries[0]?.id)
-  assert.equal(outcome.result.purchase.amount, '250')
+  assert.equal(outcome.result.purchase.amount, emberFor(250n).toString())
 
   const rows = await sql`select count(*)::int as n from purchases`
   assert.equal(rows[0]?.['n'], 1)
@@ -392,5 +396,101 @@ test('a grant nobody paid for cannot be refunded', { skip }, async () => {
       refund: true,
     }),
     /nothing to refund/,
+  )
+})
+
+/* ═══════════════════════════════════ priced in dollars, charged in EMBER, and never in Shards */
+
+test('THE PRICE IS USD AND THE CHARGE IS EMBER, and the row records both plus the rate', { skip }, async () => {
+  // The whole of the money migration, end to end. The cape is $2.50 — unchanged, which is the
+  // owner's decision (docs/ecosystem/15 §3.2: "stated USD is unchanged and the unit changes") —
+  // and at EMBER's administered 0.25 USD that is 10 EMBER.
+  const input = request()
+  const outcome = await purchase(deps(), input, requestFingerprint(body(input)))
+  const p = outcome.result.purchase
+
+  assert.equal(p.priceAssetCode, 'USD')
+  assert.equal(p.priceAmount, '250', 'still $2.50 — the stated price did not move')
+  assert.equal(p.assetCode, 'EMBER', 'and the charge is in an asset a chain backs')
+  assert.equal(p.amount, (10n * 10n ** 18n).toString())
+  assert.equal(p.rateUsdScaled, '250000', 'the arithmetic is auditable after the fact')
+
+  // 10 EMBER is 10,000,000 Sparks. Display only — there is no SPARK asset code and there must
+  // never be one, because the ledger's balancing invariant is enforced per asset code.
+  assert.equal(p.amountSparks, '10000000')
+
+  // The POSTING is what the ledger sees, and it is EMBER on both legs. A Shard posting here is
+  // the defect this whole change removes: liability with no chain behind it.
+  const postings = ledger.entries[0]?.postings ?? []
+  assert.deepEqual(
+    postings.map((x) => [x.assetCode, x.direction, x.amount]),
+    [
+      ['EMBER', 'debit', 10n * 10n ** 18n],
+      ['EMBER', 'credit', 10n * 10n ** 18n],
+    ],
+  )
+  assert.equal(
+    postings.some((x) => x.assetCode === 'SHARD' || x.assetCode === 'USD'),
+    false,
+    'a posting escaped in a unit no chain backs',
+  )
+})
+
+test('the stored row agrees with the response — the durable figure is the dollars', { skip }, async () => {
+  const input = request({ sku: 'world.private.small', scope: 'title:emberfall' })
+  await purchase(deps(), input, requestFingerprint(body(input)))
+
+  const rows = await sql<Array<Record<string, string>>>`
+    select asset_code, amount::text, price_asset_code, price_amount::text, rate_usd_scaled::text
+      from purchases
+  `
+  const row = rows[0]!
+  // $7.50 at $0.25 is 30 EMBER.
+  assert.equal(row['price_asset_code'], 'USD')
+  assert.equal(row['price_amount'], '750')
+  assert.equal(row['asset_code'], 'EMBER')
+  assert.equal(row['amount'], (30n * 10n ** 18n).toString())
+  assert.equal(row['rate_usd_scaled'], '250000')
+})
+
+test('A PURCHASE IS REFUSED WHEN THE RATE CANNOT BE READ — it is never charged at a guess', { skip }, async () => {
+  // Fail closed. You cannot charge somebody in a currency you cannot price, and the alternative to
+  // refusing is guessing how much of their money to take.
+  const input = request()
+  await assert.rejects(
+    () => purchase(deps({ pricing: fakePricing({ fail: 'the EMBER rate is not usable' }) }), input, requestFingerprint(body(input))),
+    /not usable/,
+  )
+
+  // And nothing was left behind: no entry, no purchase, no entitlement. The rate is read BEFORE
+  // the idempotency claim opens, so there is nothing to unwind.
+  assert.equal(ledger.entries.length, 0)
+  const rows = await sql`select count(*)::int as n from purchases`
+  assert.equal(rows[0]?.['n'], 0)
+  const grants = await sql`select count(*)::int as n from entitlements`
+  assert.equal(grants[0]?.['n'], 0)
+})
+
+test('the catalogue holds no active Shard price, and the database refuses a new one', { skip }, async () => {
+  const active = await sql<Array<{ asset_code: string; unit_amount: string }>>`
+    select asset_code, unit_amount::text from prices where status = 'active' order by prices.unit_amount
+  `
+  assert.deepEqual(
+    active.map((r) => r.asset_code),
+    ['USD', 'USD', 'USD', 'USD', 'USD'],
+  )
+  // The peg made this the identity on the integer: 250 Shards was $2.50, 250 cents is $2.50.
+  assert.deepEqual(
+    active.map((r) => r.unit_amount),
+    ['250', '400', '500', '750', '1000'],
+  )
+
+  // The constraint, exercised rather than asserted from the DDL text.
+  await assert.rejects(
+    () => sql`
+      insert into prices (product_id, asset_code, unit_amount, status)
+      select id, 'SHARD', 250, 'active' from products limit 1
+    `,
+    /prices_no_new_shard/,
   )
 })

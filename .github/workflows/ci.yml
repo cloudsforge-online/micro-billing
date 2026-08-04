@@ -33,6 +33,11 @@ jobs:
         IDENTITY_JWKS_URL=http://127.0.0.1:4001/.well-known/jwks.json
         IDENTITY_ISSUER=http://127.0.0.1:4001
         BILLING_LEDGER_URL=http://127.0.0.1:4007
+        # Required since the Shard retirement: the catalogue is priced in USD and settled in EMBER,
+        # so a purchase needs a rate and `env.ts` refuses to boot without somewhere to ask. Never
+        # dialled here — /livez needs no upstream. micro-deploy needs the real one; see the note in
+        # `src/env.ts`.
+        BILLING_PRICING_URL=http://127.0.0.1:4009
         OUTBOX_SIGNING_SECRET=ci-only-not-a-real-secret-000000000000
         BILLING_LEDGER_TOKEN=ci-only-not-a-real-token-0000000000000
     secrets:
