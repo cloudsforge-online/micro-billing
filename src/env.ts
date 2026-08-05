@@ -18,7 +18,7 @@
 import { hostname } from 'node:os'
 import type { LedgerAssetCode } from '@cloudsforge/contracts-money'
 import type { IssuableAssetCode } from '@cloudsforge/contracts-chain'
-import { assertGeneratedSecret, assertGeneratedSecretList } from '@cloudsforge/secrets'
+import { assertGeneratedSecret, assertGeneratedSecretList, assertServiceCredential } from '@cloudsforge/secrets'
 
 /**
  * The service's own name. A constant rather than a variable: it is a property of the repository,
@@ -35,17 +35,6 @@ export class EnvError extends Error {
     this.name = 'EnvError'
   }
 }
-
-const PLACEHOLDERS = new Set([
-  'changeme',
-  'change-me',
-  'placeholder',
-  'secret',
-  'dev-secret',
-  'dev-outbox-signing-secret',
-  'replace-with-a-real-secret',
-  'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-])
 
 type Source = Readonly<Record<string, string | undefined>>
 
@@ -86,39 +75,26 @@ export function parseSecretList(raw: string, name: string): readonly string[] {
   return Object.freeze(entries)
 }
 
-function requiredSecret(source: Source, name: string, minLength = 24): string {
-  const value = required(source, name)
-  if (PLACEHOLDERS.has(value.toLowerCase())) {
-    throw new EnvError(`${name} is set to a known placeholder — generate a real secret`)
-  }
-  // Length is a proxy for entropy and the only one available here. It is set above the point at
-  // which a human-chosen string is plausible, so a memorable password fails this check too.
-  if (value.length < minLength) {
-    throw new EnvError(`${name} must be at least ${minLength} characters (got ${value.length})`)
-  }
-  return value
-}
-
 /**
  * The estate's shared event-bus HMAC key, held to a shape rather than to a deny-list.
  *
- * `requiredSecret` above cannot be the guard for this one. It refuses a fixed list of exact
- * strings and anything under 24 characters, and the value that sat on 54 lines of a PUBLIC compose
- * file — `estate-only-outbox-secret-00000000000000` — was on no list and was 40 characters, so it
- * passed every service in the estate (micro-org #142) and was live on 44 containers across both
- * networks. A check that could not fail read as the absence of a problem. It matters here more
- * than most: this service posts to the ledger, so a forgeable event signature is a forgeable
- * movement of somebody's money.
+ * THE LOCAL `requiredSecret`, `optionalSecret` AND `PLACEHOLDERS` ARE GONE RATHER THAN KEPT IN
+ * FRONT. They refused a fixed list of exact strings and anything under 24 characters, and the
+ * value that sat on 54 lines of a PUBLIC compose file — `estate-only-outbox-secret-00000000000000`
+ * — was on no list and was 40 characters, so it passed every service in the estate (micro-org
+ * #142) and was live on 44 containers across both networks. A check that could not fail read as
+ * the absence of a problem. It matters here more than most: this service posts to the ledger, so a
+ * forgeable event signature is a forgeable movement of somebody's money.
  *
  * `assertGeneratedSecret` asserts what a placeholder cannot have: the base64 or hex alphabet (no
  * hyphens — every placeholder this estate wrote had one), 32 decoded BYTES rather than 24
  * keystrokes, and a measured Shannon entropy floor. It has no NODE_ENV exemption and no escape
  * hatch, so CI generates a real value per run rather than being let through.
  *
- * `required` rather than `requiredSecret`, deliberately: the weaker checks are a strict subset of
- * the stronger ones, and running them first would answer a 40-character placeholder with "must be
- * at least 24 characters" — a message that is true, useless, and points the operator at the wrong
- * property.
+ * `required` in front of it and nothing else, deliberately: the deleted checks were a strict
+ * subset of the stronger ones, and running them first would answer a 40-character placeholder with
+ * "must be at least 24 characters" — a message that is true, useless, and points the operator at
+ * the wrong property.
  */
 function requiredSigningSecret(source: Source, name: string): string {
   const value = required(source, name)
@@ -127,22 +103,37 @@ function requiredSigningSecret(source: Source, name: string): string {
 }
 
 /**
- * A secret that may be absent, but must be real if present.
+ * A service credential that may be absent, but must be a REAL credential if present.
  *
- * The distinction matters for the identity credential: absent is a deployment that has not been
- * given one yet and is reported by `/readyz`; a short placeholder is a deployment that believes it
- * HAS one, and would fail on its first call to a peer with a 401 that reads as "identity rejected
- * billing" rather than "nobody set this variable".
+ * The distinction matters: absent is a deployment that has not been given one yet and is reported
+ * by `/readyz`; a placeholder is a deployment that believes it HAS one, and fails on its first call
+ * to a peer with a 401 that reads as "identity rejected billing" rather than "nobody set this
+ * variable".
+ *
+ * ── WHY THIS IS `assertServiceCredential` AND NOT THE SIGNING-KEY RULE ABOVE ──────────────────
+ *
+ * The guard class is not predictable from the variable's name, so it was MEASURED rather than
+ * inferred. `BILLING_IDENTITY_CREDENTIAL` on the live estate, both networks, 2026-08-06:
+ *
+ *     mainnet   cfsc_ + 43 characters, base64url body
+ *     testnet   cfsc_ + 43 characters, base64url body
+ *
+ * A credential is minted by micro-identity, not by `openssl` — so it is neither wholly base64 nor
+ * wholly hex, and the underscore in its own `cfsc_` prefix disqualifies it. Pointing this at
+ * `assertGeneratedSecret`, which is the obvious-looking reuse, would refuse every credential the
+ * estate has ever minted and exit 1 at boot on BOTH networks.
+ *
+ * The body is base64**url**, so it may contain a hyphen. Measured across the estate's credentials
+ * on 2026-08-06, one network's body carries one and the other's does not for the same variable —
+ * `MINT_IDENTITY_CREDENTIAL` has a hyphen on mainnet and none on testnet, `NDA_IDENTITY_CREDENTIAL`
+ * the other way round. A "no hyphens" rule therefore reads as obviously right in review, passes
+ * one estate and kills the other at boot. `@cloudsforge/secrets` pins a hyphenated fixture so that
+ * regression fails CI instead of failing an estate.
  */
-function optionalSecret(source: Source, name: string, minLength = 24): string | null {
+function optionalCredential(source: Source, name: string): string | null {
   const value = source[name]?.trim()
   if (!value) return null
-  if (PLACEHOLDERS.has(value.toLowerCase())) {
-    throw new EnvError(`${name} is set to a known placeholder — generate a real secret`)
-  }
-  if (value.length < minLength) {
-    throw new EnvError(`${name} must be at least ${minLength} characters (got ${value.length})`)
-  }
+  assertServiceCredential(name, value)
   return value
 }
 
@@ -339,9 +330,10 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     instanceId: optional(source, 'INSTANCE_ID', host || 'unknown'),
     ledgerBaseUrl,
     identityUrl: optional(source, 'IDENTITY_URL', required(source, 'IDENTITY_ISSUER')),
-    // Not `requiredSecret`: see the field comment. The absence is caught by `/readyz`, which is
-    // a check that can fail, rather than by a boot CI cannot perform.
-    identityCredential: optionalSecret(source, 'BILLING_IDENTITY_CREDENTIAL'),
+    // Optional, not required: see the field comment. The absence is caught by `/readyz`, which is
+    // a check that can fail, rather than by a boot CI cannot perform. PRESENT is now held to the
+    // credential SHAPE rather than to a deny-list plus 24 characters (micro-org #212).
+    identityCredential: optionalCredential(source, 'BILLING_IDENTITY_CREDENTIAL'),
     legacyServiceTokenPresent:
       (source['BILLING_LEDGER_TOKEN']?.trim() ?? '').length > 0 ||
       (source['BILLING_ADMIN_API_TOKEN']?.trim() ?? '').length > 0,

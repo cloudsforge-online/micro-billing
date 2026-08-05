@@ -55,17 +55,35 @@ test('a ledger URL that is not absolute is refused rather than silently relative
   assert.throws(() => loadEnv({ ...BASE, BILLING_LEDGER_URL: 'ledger:4000' }), /absolute http/)
 })
 
-test('the identity credential is a secret, so a placeholder is refused', () => {
+test('the identity credential is held to a CREDENTIAL shape, not to a deny-list', () => {
   // BILLING_LEDGER_TOKEN was the subject here. It is retired — a 600-second token read once at
-  // boot — and the credential that replaced it takes the same placeholder and length checks for
-  // the same reasons.
+  // boot — and the credential that replaced it was still on the deny-list guard until micro-org
+  // #212: a fixed set of exact strings plus a 24-character floor.
+  //
+  // THIS TEST USED TO ASSERT THAT GUARD'S MESSAGES, which is why it never went red while the guard
+  // could not fail. It now asserts REFUSAL of values the deny-list passed.
   assert.throws(
     () => loadEnv({ ...BASE, BILLING_IDENTITY_CREDENTIAL: 'changeme' }),
-    /known placeholder/,
+    /BILLING_IDENTITY_CREDENTIAL/,
   )
+  assert.throws(() => loadEnv({ ...BASE, BILLING_IDENTITY_CREDENTIAL: 'short' }), /BILLING_IDENTITY_CREDENTIAL/)
+
+  // 40 characters, on no deny-list, and the literal that was live on 44 containers. The old guard
+  // passed it here; a credential guard refuses it because it carries no `cfsc_` prefix.
   assert.throws(
-    () => loadEnv({ ...BASE, BILLING_IDENTITY_CREDENTIAL: 'short' }),
-    /at least 24 characters/,
+    () => loadEnv({ ...BASE, BILLING_IDENTITY_CREDENTIAL: 'estate-only-outbox-secret-00000000000000' }),
+    /not a service credential/,
+  )
+  // The prefix is not the credential. Long enough and varied enough to clear the byte and entropy
+  // floors — only the marker check on the BODY refuses it.
+  assert.throws(
+    () => loadEnv({ ...BASE, BILLING_IDENTITY_CREDENTIAL: 'cfsc_ci-only-Xq7Zm2Bv9Kd4Rt6Yw1Ns3Hj5Lp8Fg0Ac2De4Uz' }),
+    /reads as a placeholder/,
+  )
+  // A JWT in a credential slot is a ten-minute bearer read once at boot — micro-org #197/#222.
+  assert.throws(
+    () => loadEnv({ ...BASE, BILLING_IDENTITY_CREDENTIAL: 'eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJiaWxsaW5nIn0.AAAA' }),
+    /carries a TOKEN, not a credential/,
   )
   assert.throws(() => loadEnv({ ...BASE, OUTBOX_SIGNING_SECRET: 'placeholder' }), /known placeholder/)
 })
@@ -233,7 +251,17 @@ test('THE PERCENTAGE IS NOT AN ENVIRONMENT VARIABLE', () => {
  * ──────────────────────────────────────────────────────────────────────────────────────────────── */
 
 test('the identity credential is read, and its absence is a null rather than a throw', () => {
-  const CREDENTIAL = 'cfsc_a-long-lived-credential-that-does-not-expire'
+  // THE BODY CARRIES A HYPHEN ON PURPOSE. A credential body is base64**url**, and measured live on
+  // 2026-08-06 one estate's body contains a hyphen for a given variable while the other's does not
+  // — `MINT_IDENTITY_CREDENTIAL` has one on mainnet and none on testnet, `NDA_IDENTITY_CREDENTIAL`
+  // the other way round. A "no hyphens" rule reads as obviously right, passes one estate and kills
+  // the other at boot; this fixture makes that regression fail CI instead.
+  //
+  // The literal that used to sit here, `cfsc_a-long-lived-credential-that-does-not-expire`, is a
+  // TYPED English phrase: 43 characters and 32 bytes, but 3.785 bits per character, below the 4.0
+  // floor. It is now correctly refused, and a fixture exempt from the rule it exercises is how the
+  // placeholder in micro-org #142 survived every test in the estate.
+  const CREDENTIAL = 'cfsc_vFpu5q-4UwZTvGSezkD9nTOy8r6lxWbhIBm8eaJoXiE'
   assert.equal(
     loadEnv({ ...BASE, BILLING_IDENTITY_CREDENTIAL: CREDENTIAL }).identityCredential,
     CREDENTIAL,
