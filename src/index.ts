@@ -182,6 +182,7 @@ const server = createServer({
   verifier,
   sql: sql as unknown as Db,
   purchases,
+  eventAcceptSecrets: env.acceptSecrets,
   // Sampled at scrape time rather than on a timer. There is no `setInterval` in this repository
   // and CI greps for one — rule 8. A scrape is already periodic, so the scrape is when to sample.
   beforeScrape: async () => {

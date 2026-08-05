@@ -17,9 +17,12 @@ import { Lifecycle } from '@cloudsforge/lifecycle'
 import { Logger, Metrics, registerHttpMetrics, registerJobMetrics } from '@cloudsforge/telemetry'
 import { createServer, registerServiceMetrics, type PrincipalVerifier } from './server.ts'
 import {
+  ALICE,
   ALICE_ID,
   BOB_ID,
+  EVENT_SECRET,
   enabled,
+  signedEvent,
   fakeLedger,
   freshKey,
   migrateTestDb,
@@ -97,6 +100,7 @@ before(async () => {
       // runtime: `as never` silences the one check that would have named the missing field.
       // The getter above is the only reason a cast was ever reached for, and it does not need one.
     } satisfies PurchaseDeps,
+    eventAcceptSecrets: [EVENT_SECRET],
   })
   await new Promise<void>((resolve) => server.listen(0, () => resolve()))
   lifecycle.markReady()
@@ -411,4 +415,98 @@ test('an unmatched path is a 404 carrying the request id', { skip }, async () =>
   const response = await call('GET', '/nope')
   assert.equal(response.status, 404)
   assert.match(response.text, /"requestId"/)
+})
+
+/* ------------------------------------------------------------------ POST /v1/events */
+
+async function post(event: { body: string; headers: Record<string, string> }): Promise<Response> {
+  const response = await fetch(`${baseUrl}/v1/events`, {
+    method: 'POST',
+    headers: event.headers,
+    body: event.body,
+  })
+  const text = await response.text()
+  let body: Record<string, never> = {} as Record<string, never>
+  try {
+    body = JSON.parse(text) as Record<string, never>
+  } catch {
+    /* not JSON */
+  }
+  return { status: response.status, body, text }
+}
+
+test('an unsigned or wrongly signed delivery is 403 — never 401', { skip }, async () => {
+  // 401 would say "authenticate and try again", which invites a caller to go looking for a bearer
+  // token this route does not have. The MAC is the credential, and it was wrong.
+  const forged = signedEvent(
+    'identity.user.deleted',
+    { userId: ALICE_ID },
+    { secret: 'a-different-secret-that-is-long-enough' },
+  )
+  assert.equal((await post(forged)).status, 403)
+
+  const unsigned = signedEvent('identity.user.deleted', { userId: ALICE_ID })
+  const stripped = { body: unsigned.body, headers: { 'content-type': 'application/json' } }
+  assert.equal((await post(stripped)).status, 403)
+})
+
+test('a signature is checked over the bytes as sent, so a re-serialised body fails', { skip }, async () => {
+  const event = signedEvent('identity.user.deleted', { userId: ALICE_ID })
+  // Same JSON, different bytes. If the route parsed first and verified against a re-serialisation,
+  // this would pass — and so would a forgery that round-trips to the same object.
+  const reserialised = JSON.stringify(JSON.parse(event.body), null, 2)
+  assert.equal((await post({ body: reserialised, headers: event.headers })).status, 403)
+})
+
+test('a topic this service does not consume is 202 ignored, never 4xx', { skip }, async () => {
+  // A 4xx makes the producer's relay retry the same event for ever.
+  const response = await post(signedEvent('identity.session.created', { userId: ALICE_ID }))
+  assert.equal(response.status, 202)
+  assert.equal(response.body['status'], 'ignored')
+})
+
+test('a correctly signed erasure is accepted, and erases', { skip }, async () => {
+  await buy({ token: 'alice' })
+  const before = await sql<Array<{ n: number }>>`
+    select count(*)::int as n from entitlements where subject = ${ALICE}
+  `
+  assert.equal(before[0]?.n, 1)
+
+  const response = await post(signedEvent('identity.user.deleted', { userId: ALICE_ID }))
+  assert.equal(response.status, 202)
+  assert.equal(response.body['status'], 'recorded')
+
+  const after = await sql<Array<{ n: number }>>`
+    select count(*)::int as n from entitlements where subject = ${ALICE}
+  `
+  assert.equal(after[0]?.n, 0)
+  const purchase = await sql<Array<{ subject: string; actor: string }>>`
+    select subject, actor from purchases
+  `
+  assert.equal(purchase[0]?.subject, 'erased:user')
+  assert.equal(purchase[0]?.actor, 'erased:user')
+})
+
+test('a redelivery is a duplicate, not a second erasure', { skip }, async () => {
+  await buy({ token: 'alice' })
+  const event = signedEvent('identity.user.deleted', { userId: ALICE_ID })
+  assert.equal((await post(event)).status, 202)
+
+  // The same envelope, byte for byte, as an at-least-once relay would resend it. `withInbox`
+  // dedupes on (topic, event_id) — the insert that loses is the one that skips the handler.
+  const again = await post(event)
+  assert.equal(again.status, 202)
+  assert.equal(again.body['status'], 'duplicate')
+})
+
+test('an erasure with no uuid userId is 400, and stays visible', { skip }, async () => {
+  // Deliberately NOT absorbed into a 202. A request this service cannot read is a person whose
+  // data is still here while the deletion is being reported as done.
+  assert.equal((await post(signedEvent('identity.user.deleted', {}))).status, 400)
+  assert.equal((await post(signedEvent('identity.user.deleted', { userId: 'nope' }))).status, 400)
+})
+
+test('an event with no uuid envelope id is 400', { skip }, async () => {
+  const event = signedEvent('identity.user.deleted', { userId: ALICE_ID }, { id: 'not-a-uuid' })
+  assert.equal((await post(event)).status, 400)
 })

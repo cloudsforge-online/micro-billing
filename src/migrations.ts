@@ -652,6 +652,143 @@ export const MIGRATIONS: readonly Migration[] = [
         check (price_amount = 0 or amount > 0);
     `,
   },
+
+  {
+    version: 12,
+    name: 'erasure',
+    up: `
+      -- ════════════════════════════════════════════════════════════════════════════════════════
+      -- RIGHT TO ERASURE — THE HALF THAT BELONGS IN THE SCHEMA.
+      --
+      -- 03 §2 rule 6: every service storing a user reference subscribes to 'identity.user.deleted'
+      -- and erases. The handler is 'src/erasure.ts' and its header is the table-by-table reasoning
+      -- and the lawful basis for each row that survives. What is HERE is only the part a handler
+      -- cannot be trusted with, because a handler is one deploy away from being wrong and these
+      -- rows outlive the deploy:
+      --
+      --   1. An erased row is STRUCTURALLY DISTINGUISHABLE. 'erased_at' is not decoration — a
+      --      subject reading 'erased:user' with no timestamp beside it, or a timestamp with a real
+      --      subject still on the row, is a half-finished erasure, and each biconditional CHECK
+      --      below makes that state unrepresentable rather than merely unlikely.
+      --
+      --   2. An erased row CANNOT BE RE-ATTRIBUTED. A CHECK cannot express that, because it sees
+      --      one row and not the transition — so the trigger does. Once 'erased_at' is set, the
+      --      subject is frozen and the timestamp cannot be cleared, by anything, including a psql
+      --      session. Erasure that a later UPDATE can undo is not erasure.
+      --
+      --   3. An erased row CANNOT STILL BE OWED SOMETHING. A cancelled subscription that the
+      --      renewal job can still pick up would charge a deleted person every month; a pending
+      --      payout still naming a wallet would try to pay an account that no longer exists. Both
+      --      are stated as constraints so the erasure and the lifecycle cannot drift apart.
+      --
+      -- WHY 'erased:user' AND NOT A PER-USER PLACEHOLDER. A hash or a per-user token would keep
+      -- every row of one person linked to every other, and a linked sequence of timestamped
+      -- amounts is a re-identifying fingerprint however unreadable its key is — that is
+      -- pseudonymisation, which is still personal data, not anonymisation. One shared placeholder
+      -- MERGES erased people into each other, which is the property that makes what remains
+      -- genuinely no longer about anybody. It costs the ability to answer "what did this deleted
+      -- person buy", which is exactly the ability being given up on purpose.
+      --
+      -- It is also not a valid AccountSubject: 'user:', 'community:' and 'organisation:' are the
+      -- three kinds ('src/entitlements.ts' parseScope, contracts-money userSubject), so no live
+      -- subject can ever collide with it and no lookup can accidentally return an erased row.
+      -- ════════════════════════════════════════════════════════════════════════════════════════
+
+      alter table purchases     add column if not exists erased_at timestamptz;
+      alter table subscriptions add column if not exists erased_at timestamptz;
+      alter table invoices      add column if not exists erased_at timestamptz;
+      alter table payouts       add column if not exists erased_at timestamptz;
+
+      -- The biconditional, in the same shape as engagement_fee_recycles_posted_names_entry: both
+      -- halves, so neither a placeholder without the timestamp nor a timestamp without the
+      -- placeholder can exist. Existing rows satisfy it trivially (false = false).
+      alter table purchases
+        add constraint purchases_erased_names_placeholder
+        check ((subject = 'erased:user') = (erased_at is not null));
+
+      -- 'actor' is the SECOND identifier on this table and it was not in the issue's list. It is
+      -- written as 'user:<uuid>' for a user-initiated purchase (src/server.ts actorOf), so a
+      -- subject-only erasure would leave the same person named in the column beside it. A
+      -- service-initiated purchase carries 'service:<name>', which is not personal data — but it
+      -- is overwritten too, because an erased row must not disclose who acted on it either way and
+      -- a conditional rule here is a rule somebody gets wrong.
+      alter table purchases
+        add constraint purchases_erased_names_no_actor
+        check (erased_at is null or actor = 'erased:user');
+
+      alter table subscriptions
+        add constraint subscriptions_erased_names_placeholder
+        check ((subject = 'erased:user') = (erased_at is not null));
+
+      -- THE ONE THAT STOPS A DELETED PERSON BEING CHARGED. subscriptions_due_idx is the renewal
+      -- job's access path and it selects 'trialing', 'active' and 'past_due'; this constraint makes
+      -- an erased row incapable of being in any of them.
+      alter table subscriptions
+        add constraint subscriptions_erased_is_terminal
+        check (erased_at is null or status in ('cancelled', 'expired'));
+
+      alter table invoices
+        add constraint invoices_erased_names_placeholder
+        check ((subject = 'erased:user') = (erased_at is not null));
+
+      alter table payouts
+        add constraint payouts_erased_names_placeholder
+        check ((subject = 'erased:user') = (erased_at is not null));
+
+      -- A payout is money leaving the platform towards a person. 'pending' and 'approved' are the
+      -- states in which it has not left yet, and there is nobody left to pay: the destination
+      -- wallet belongs to an account being deleted. Erasure therefore has to settle the payout's
+      -- lifecycle, not just its identity, and this refuses the state in which it would not have.
+      alter table payouts
+        add constraint payouts_erased_is_settled
+        check (erased_at is null or status in ('paid', 'failed', 'cancelled'));
+
+      -- The wallet id is a live pointer at the person's account in another service. An erased
+      -- payout keeps its arithmetic and gives up its destination.
+      alter table payouts
+        add constraint payouts_erased_names_no_wallet
+        check (erased_at is null or destination_wallet_id is null);
+
+      -- ── THE TRANSITION, WHICH NO CHECK CAN SEE ──────────────────────────────────────────────
+      --
+      -- One function for four tables: each of them has exactly 'subject' and 'erased_at', so the
+      -- rule is the same rule and writing it four times is four places for it to drift. Raised as
+      -- an exception rather than silently discarded, because a caller trying to re-attribute an
+      -- erased row is a bug that must be seen, not absorbed.
+      create or replace function billing_erasure_is_final() returns trigger as $$
+      begin
+        if old.erased_at is null then return new; end if;
+        if new.erased_at is null then
+          raise exception 'an erased row cannot be un-erased (%.%)', tg_table_name, old.id;
+        end if;
+        if new.subject is distinct from old.subject then
+          raise exception 'an erased row cannot be re-attributed (%.%)', tg_table_name, old.id;
+        end if;
+        return new;
+      end;
+      $$ language plpgsql;
+
+      drop trigger if exists purchases_erasure_final on purchases;
+      create trigger purchases_erasure_final
+        before update on purchases
+        for each row execute function billing_erasure_is_final();
+
+      drop trigger if exists subscriptions_erasure_final on subscriptions;
+      create trigger subscriptions_erasure_final
+        before update on subscriptions
+        for each row execute function billing_erasure_is_final();
+
+      drop trigger if exists invoices_erasure_final on invoices;
+      create trigger invoices_erasure_final
+        before update on invoices
+        for each row execute function billing_erasure_is_final();
+
+      drop trigger if exists payouts_erasure_final on payouts;
+      create trigger payouts_erasure_final
+        before update on payouts
+        for each row execute function billing_erasure_is_final();
+    `,
+  },
 ]
 
 /**

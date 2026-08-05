@@ -21,9 +21,11 @@
  * Not a test file itself — it is excluded from the build and contains no `test()` call.
  */
 
+import { randomUUID } from 'node:crypto'
 import postgres from 'postgres'
 import { migrate, type Sql as DbSql } from '@cloudsforge/db'
 import { chainSpec, coinAmountForUsdCents } from '@cloudsforge/contracts-chain'
+import { EVENT_ID_HEADER, SIGNATURE_HEADER, signDelivery } from '@cloudsforge/contracts-events'
 import { RateUnavailableError, type PricingClient } from './pricingclient.ts'
 import { MIGRATIONS } from './migrations.ts'
 import {
@@ -130,6 +132,49 @@ export const ALICE_ID = '11111111-1111-4111-8111-111111111111'
 export const BOB_ID = '22222222-2222-4222-8222-222222222222'
 export const ALICE = `user:${ALICE_ID}`
 export const BOB = `user:${BOB_ID}`
+
+/**
+ * The secret the test server accepts event deliveries under.
+ *
+ * At least 24 characters, because `parseSecretList` refuses anything shorter and a fixture that
+ * would be rejected by the real `loadEnv` is a fixture testing a configuration no deploy can have.
+ */
+export const EVENT_SECRET = 'test-event-secret-0123456789abcdef'
+
+/**
+ * An envelope signed the way identity's relay signs it, and the reason this helper exists at all.
+ *
+ * `signDelivery` is imported from the CONTRACT rather than reimplemented here. A hand-rolled signer
+ * in the test fixture would pass against a hand-rolled verifier in the service and both could be
+ * wrong together — which is exactly the failure that would leave every real erasure event rejected
+ * while the suite stayed green.
+ */
+export function signedEvent(
+  topic: string,
+  payload: Record<string, unknown>,
+  options: { readonly id?: string; readonly key?: string; readonly secret?: string } = {},
+): { readonly body: string; readonly headers: Record<string, string> } {
+  const id = options.id ?? randomUUID()
+  const body = JSON.stringify({
+    id,
+    topic,
+    key: options.key ?? String(payload['userId'] ?? id),
+    occurredAt: new Date().toISOString(),
+    producer: 'identity',
+    version: 1,
+    actor: null,
+    correlationId: null,
+    payload,
+  })
+  return {
+    body,
+    headers: {
+      'content-type': 'application/json',
+      [SIGNATURE_HEADER]: signDelivery(body, options.secret ?? EVENT_SECRET),
+      [EVENT_ID_HEADER]: id,
+    },
+  }
+}
 
 let counter = 0
 

@@ -54,6 +54,34 @@ function required(source: Source, name: string): string {
   return value
 }
 
+/**
+ * A comma-separated secret list, for a receiver that must accept more than one key at a time.
+ *
+ * Every entry is held to the same bar as a single secret: a rotation that admits a placeholder or
+ * a short key has widened the credential rather than replaced it. A duplicate is refused because
+ * "which key verified this" is the answer that tells an operator a rotation has finished and the
+ * old key can be dropped, and a repeated entry makes it ambiguous.
+ */
+export function parseSecretList(raw: string, name: string): readonly string[] {
+  const entries = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+  if (entries.length === 0) throw new EnvError(`${name} is required — at least one secret`)
+  for (const entry of entries) {
+    if (PLACEHOLDERS.has(entry.toLowerCase())) {
+      throw new EnvError(`${name} contains a known placeholder — generate real secrets`)
+    }
+    if (entry.length < 24) {
+      throw new EnvError(`${name} entries must each be at least 24 characters`)
+    }
+  }
+  if (new Set(entries).size !== entries.length) {
+    throw new EnvError(`${name} lists the same secret twice`)
+  }
+  return Object.freeze(entries)
+}
+
 function requiredSecret(source: Source, name: string, minLength = 24): string {
   const value = required(source, name)
   if (PLACEHOLDERS.has(value.toLowerCase())) {
@@ -119,8 +147,22 @@ export interface Env {
   readonly databasePoolMax: number
   readonly identityJwksUrl: string
   readonly identityIssuer: string
-  /** HMAC key for outbound event signatures, so a subscriber can prove an event came from us. */
+  /**
+   * HMAC key for outbound event signatures, so a subscriber can prove an event came from us.
+   * Exactly one, always: a producer signing under two keys at once has not rotated, it has forked.
+   */
   readonly outboxSigningSecret: string
+  /**
+   * The secrets `POST /v1/events` will ACCEPT, newest first.
+   *
+   * Defaults to `[outboxSigningSecret]` when `OUTBOX_ACCEPT_SECRETS` is unset, so a deploy that
+   * does not set it behaves exactly as it did before this route existed. That is deliberate: it
+   * makes shipping the erasure subscriber a no-op for the deploy manifest, and it is what lets the
+   * estate's shared secret be rotated one service at a time afterwards rather than on a flag day.
+   * Without it, the moment identity's relay moved to a new key every erasure event would 403 and
+   * retry for ever behind a green `/livez`.
+   */
+  readonly acceptSecrets: readonly string[]
   readonly instanceId: string
   /** Where the ledger is. Billing holds no balance; every movement of value is posted there. */
   readonly ledgerBaseUrl: string
@@ -222,6 +264,9 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     throw new EnvError(`LOG_LEVEL must be one of debug, info, warn, error (got ${logLevel})`)
   }
 
+  // Read before the object literal because the accept list falls back to it.
+  const outboxSigningSecret = requiredSecret(source, 'OUTBOX_SIGNING_SECRET')
+
   const ledgerBaseUrl = required(source, 'BILLING_LEDGER_URL')
   if (!/^https?:\/\//i.test(ledgerBaseUrl)) {
     throw new EnvError(`BILLING_LEDGER_URL must be an absolute http(s) URL (got ${ledgerBaseUrl})`)
@@ -255,7 +300,11 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     databasePoolMax: integer(source, 'BILLING_DATABASE_POOL_MAX', 10, 1, 100),
     identityJwksUrl: required(source, 'IDENTITY_JWKS_URL'),
     identityIssuer: required(source, 'IDENTITY_ISSUER'),
-    outboxSigningSecret: requiredSecret(source, 'OUTBOX_SIGNING_SECRET'),
+    outboxSigningSecret,
+    acceptSecrets: parseSecretList(
+      optional(source, 'OUTBOX_ACCEPT_SECRETS', outboxSigningSecret),
+      'OUTBOX_ACCEPT_SECRETS',
+    ),
     instanceId: optional(source, 'INSTANCE_ID', host || 'unknown'),
     ledgerBaseUrl,
     identityUrl: optional(source, 'IDENTITY_URL', required(source, 'IDENTITY_ISSUER')),

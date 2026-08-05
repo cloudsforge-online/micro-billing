@@ -62,7 +62,19 @@ import {
   type PurchaseDeps,
 } from './purchases.ts'
 import { listSubscriptions, toWire as subscriptionToWire } from './subscriptions.ts'
-import type { Db } from './outbox.ts'
+import {
+  IDENTITY_USER_DELETED,
+  SUBSCRIBED_TOPICS,
+  UUID,
+  eraseUser,
+} from './erasure.ts'
+import {
+  EVENT_ID_HEADER,
+  SIGNATURE_HEADER,
+  verifyInboundDelivery,
+  withInbox,
+  type Db,
+} from './outbox.ts'
 
 /** The verifier as this file needs it. An interface, so a test does not need a JWKS. */
 export interface PrincipalVerifier {
@@ -76,6 +88,16 @@ export interface ServerDeps {
   readonly verifier: PrincipalVerifier
   readonly sql: Db
   readonly purchases: PurchaseDeps
+  /**
+   * The secrets `POST /v1/events` will accept a delivery signature under.
+   *
+   * A LIST, not a string, and that is the whole point of it: `OUTBOX_SIGNING_SECRET` is one HMAC
+   * key shared across the estate and it has to be replaceable. A rolling rotation only works if a
+   * receiver accepts the outgoing and the incoming key at once for the length of the cutover —
+   * otherwise the instant identity's relay moves, every erasure event 403s and retries for ever,
+   * with a green `/livez`.
+   */
+  readonly eventAcceptSecrets: readonly string[]
   /** Refresh sampled gauges immediately before `/metrics` renders. */
   readonly beforeScrape?: () => Promise<void>
 }
@@ -586,6 +608,80 @@ function buildRoutes(): Route[] {
       const subscriptions = await listSubscriptions(deps.sql, userSubject(userId), readLimit(ctx))
       return { status: 200, body: { subscriptions: subscriptions.map(subscriptionToWire) } }
     }),
+
+    /**
+     * The inbound event webhook — and the only unauthenticated write surface in this service.
+     *
+     * There is no bearer token here and there must not be: the MAC over the body IS the
+     * credential, and it is checked over the RAW BYTES before anything is parsed. Parsing first
+     * would put the JSON parser in front of the check, which is an unauthenticated caller reaching
+     * a parser; comparing byte-at-a-time would make the MAC comparison a forgery oracle.
+     * `verifyInboundDelivery` does both correctly, over the contract's scheme — see its header for
+     * why the contract's and not this file's.
+     *
+     * A bad signature is **403, not 401**. 401 says "authenticate and try again", which invites a
+     * caller to go looking for a token that does not exist for this route; 403 says the credential
+     * presented was wrong, which is the truth.
+     *
+     * A topic this service does not subscribe to is **202 ignored, never 4xx**. The relay treats
+     * any non-2xx as a delivery failure and retries it, so 4xx-ing an event nobody is wrong about
+     * would pin the producer in a retry loop for ever.
+     */
+    define('POST', '/v1/events', async (ctx, deps) => {
+      const raw = await readRaw(ctx.req)
+      if (!verifyInboundDelivery(raw, headerOf(ctx.req, SIGNATURE_HEADER) ?? '', deps.eventAcceptSecrets)) {
+        ctx.log.warn('event rejected: bad signature', { eventId: headerOf(ctx.req, EVENT_ID_HEADER) })
+        return errorReply(403, 'bad_signature', 'the event signature did not verify', ctx.requestId)
+      }
+
+      let envelope: { id?: unknown; topic?: unknown; payload?: unknown }
+      try {
+        envelope = JSON.parse(raw) as typeof envelope
+      } catch {
+        throw new BadRequestError('the event body is not valid JSON')
+      }
+      const topic = typeof envelope.topic === 'string' ? envelope.topic : ''
+      const eventId = typeof envelope.id === 'string' ? envelope.id : ''
+      if (!UUID.test(eventId)) throw new BadRequestError('the event id must be a uuid')
+      if (!SUBSCRIBED_TOPICS.has(topic)) return { status: 202, body: { status: 'ignored' } }
+
+      const payload = (envelope.payload ?? {}) as Record<string, unknown>
+      const userId = payload['userId']
+      // A 400 here, and the relay WILL retry it for ever — which is correct. An erasure request
+      // this service cannot read is a person whose data is still here and whose deletion is being
+      // reported as done, and it must stay visible rather than being absorbed into a 202.
+      if (typeof userId !== 'string' || !UUID.test(userId)) {
+        throw new BadRequestError(`${IDENTITY_USER_DELETED} requires a uuid userId`)
+      }
+
+      const done = deps.lifecycle.track()
+      try {
+        const outcome = await withInbox(deps.sql, topic, eventId, (tx) => eraseUser(tx, userId))
+        // Counts and field names only. The user id is never logged — logging the identifier of the
+        // person who asked to be forgotten, into an aggregator with its own retention, is the
+        // shape of defect this handler exists to fix.
+        ctx.log.info('erasure processed', {
+          topic,
+          eventId,
+          outcome: outcome.status,
+          ...(outcome.status === 'processed' ? outcome.value : {}),
+        })
+        if (outcome.status === 'processed' && outcome.value.payoutsCancelled > 0) {
+          // Not a failure, but somebody left with money owed. Surfaced at warn so it is not buried
+          // in an info line nobody reads.
+          ctx.log.warn('erasure cancelled unpaid payouts', {
+            eventId,
+            payoutsCancelled: outcome.value.payoutsCancelled,
+          })
+        }
+        return {
+          status: 202,
+          body: { status: outcome.status === 'duplicate' ? 'duplicate' : 'recorded' },
+        }
+      } finally {
+        done()
+      }
+    }),
   ]
 }
 
@@ -661,6 +757,26 @@ function actorOf(principal: Principal): string {
 }
 
 /* ------------------------------------------------------------------------ body parsing */
+
+/**
+ * The body as the bytes that were sent, for the one route that has to verify a MAC over them.
+ *
+ * Separate from `readJson` rather than a flag on it, because the property this needs is that
+ * NOTHING has been parsed yet. A re-serialised body is a different byte string — a different key
+ * order, a different number rendering — and the signature would fail against it for reasons that
+ * look exactly like an attack.
+ */
+async function readRaw(req: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    const buffer = chunk as Buffer
+    size += buffer.length
+    if (size > MAX_BODY_BYTES) throw new BadRequestError('request body too large')
+    chunks.push(buffer)
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = []

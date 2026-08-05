@@ -19,6 +19,7 @@
 
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
+import { EVENT_ID_HEADER, SIGNATURE_HEADER, verifyDelivery } from '@cloudsforge/contracts-events'
 import { HttpClient } from '@cloudsforge/http'
 import type { Logger } from '@cloudsforge/telemetry'
 import type { Handler } from '@cloudsforge/jobs'
@@ -98,7 +99,14 @@ export async function withOutbox<T>(
 
 /* ------------------------------------------------------------------------ signing */
 
-const SIGNATURE_HEADER = 'x-cloudsforge-signature'
+/**
+ * The header THIS SERVICE'S RELAY SENDS. Still the local scheme, and deliberately untouched here.
+ *
+ * Every consumer of a `billing.*` topic verifies `sha256=<hmac>` under this name today, so moving
+ * the producer half is a coordinated change across those consumers and is not what the erasure
+ * subscriber needs. The INBOUND half below is a different question with a different answer.
+ */
+const LEGACY_SIGNATURE_HEADER = 'x-cloudsforge-signature'
 
 /** `sha256=<hex>` over the exact bytes sent, so a subscriber verifies before parsing. */
 export function signEvent(body: string, secret: string): string {
@@ -112,6 +120,40 @@ export function verifyEventSignature(body: string, secret: string, presented: st
   if (expected.length !== actual.length) return false
   return timingSafeEqual(expected, actual)
 }
+
+/* ------------------------------------------------------------------------ inbound signing */
+
+/**
+ * **What arrives here is signed the CONTRACT'S way, not this file's, and that is a fact about
+ * another repository rather than a preference.**
+ *
+ * The one producer this service subscribes to is identity, and `identity/src/outbox.ts:48` imports
+ * `signDelivery` from `@cloudsforge/contracts-events`: `cf-signature: t=<seconds>,v1=<hmac over
+ * "<seconds>.<body>">`. Verifying inbound with the local `verifyEventSignature` above — which
+ * expects `x-cloudsforge-signature: sha256=<hmac over body>` under a different header name — would
+ * reject every `identity.user.deleted` delivery for ever, with a green `/livez` and a relay
+ * retrying a 403 until someone read the delivery-failure table. That is the erasure gap this
+ * subscriber exists to close, reintroduced one layer down.
+ *
+ * So the inbound arm is the contract's, imported rather than copied, and there is deliberately no
+ * legacy arm: nothing in the estate has ever delivered an event to this service, so there is no
+ * installed base to keep working and no dead code to justify later. The contract's scheme also
+ * binds a timestamp INSIDE the signed message, which the local scheme does not, so a captured
+ * delivery stops being a credential after `DELIVERY_TOLERANCE_MS`.
+ *
+ * `secrets` is a list for rotation: an endpoint publishes a new secret, accepts both for a window,
+ * then drops the old one. Every candidate is compared timing-safely inside `verifyDelivery`.
+ */
+export function verifyInboundDelivery(
+  body: string,
+  presented: string,
+  secrets: string | readonly string[],
+): boolean {
+  if (presented.length === 0) return false
+  return verifyDelivery(body, presented, secrets).ok
+}
+
+export { EVENT_ID_HEADER, SIGNATURE_HEADER }
 
 /* ------------------------------------------------------------------------ relay */
 
@@ -263,7 +305,7 @@ async function deliver(
       // The event id is the idempotency key, which is what makes this POST safe to retry and is
       // the same value the subscriber dedupes on.
       idempotencyKey: envelope.id,
-      headers: { [SIGNATURE_HEADER]: signature, 'x-event-id': envelope.id },
+      headers: { [LEGACY_SIGNATURE_HEADER]: signature, 'x-event-id': envelope.id },
       ...(envelope.correlationId ? { requestId: envelope.correlationId } : {}),
     })
     await deps.sql`
