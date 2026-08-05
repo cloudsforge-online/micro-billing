@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { assertIssuable, isRetiredAsset } from '@cloudsforge/contracts-chain'
+import { randomBytes } from 'node:crypto'
 
 /**
  * A valid environment, applied to the process before `./env.ts` is imported.
@@ -14,7 +15,11 @@ const VALID: Record<string, string> = {
   BILLING_DATABASE_URL: 'postgres://billing:pw@127.0.0.1:5432/billing',
   IDENTITY_JWKS_URL: 'http://identity.test/.well-known/jwks.json',
   IDENTITY_ISSUER: 'http://identity.test',
-  OUTBOX_SIGNING_SECRET: 'K2sN4vQ8xR1wB6tY9zL3mF7hC5jD0pA4',
+  // GENERATED, not written. `assertGeneratedSecret` refuses a typed value, and a fixture
+  // exempt from the rule it is meant to exercise is how the placeholder in micro-org #142
+  // survived every test in the estate. The literal that used to sit here was 32 characters
+  // but only 24 BYTES, and is now refused — see the case that names it.
+  OUTBOX_SIGNING_SECRET: randomBytes(48).toString('base64'),
   BILLING_LEDGER_URL: 'http://ledger.test:4000',
   BILLING_PRICING_URL: 'http://pricing.test:4000',
 }
@@ -63,6 +68,78 @@ test('the identity credential is a secret, so a placeholder is refused', () => {
     /at least 24 characters/,
   )
   assert.throws(() => loadEnv({ ...BASE, OUTBOX_SIGNING_SECRET: 'placeholder' }), /known placeholder/)
+})
+
+test('THE VALUE THAT SAT IN A PUBLIC REPOSITORY IS REFUSED, and every near miss with it', () => {
+  // micro-org #142. Each of these cleared the old guard — a deny-list of exact strings plus a
+  // 24-character floor — and each is a real string that was deployed or set in CI, not an invented
+  // one. The first was live on 44 containers across both networks. If a future edit weakens the
+  // floor, it fails against evidence rather than against taste.
+  for (const value of [
+    'estate-only-outbox-secret-00000000000000', // 54 lines of a PUBLIC compose file, 40 chars
+    'ci-only-not-a-real-secret-000000000000', // this repository's own former smoke-env value
+    'K2sN4vQ8xR1wB6tY9zL3mF7hC5jD0pA4', // this file's own former fixture: 32 chars, 24 bytes
+    '0'.repeat(64), // right alphabet, right length, no entropy
+  ]) {
+    assert.throws(
+      () => loadEnv({ ...BASE, OUTBOX_SIGNING_SECRET: value }),
+      (err: unknown) => {
+        // The refusal must not echo the value: the reason this guard exists is that the value was
+        // readable, and a message carrying it moves the secret to the log collector.
+        const message = (err as Error).message
+        assert.ok(!message.includes(value), 'the refusal echoed the value')
+        assert.match(message, /OUTBOX_SIGNING_SECRET/)
+        assert.match(message, /openssl rand -base64 48/)
+        return true
+      },
+    )
+    // AND THE ACCEPT LIST TOO. The signing key is what this service SENDS under; the accept list
+    // is what it will BELIEVE. A rotation window that admits the leaked value is the whole defect
+    // wearing a rotation's clothes, so the list gets the identical bar.
+    assert.throws(
+      () => loadEnv({ ...BASE, OUTBOX_ACCEPT_SECRETS: value }),
+      (err: unknown) => {
+        const message = (err as Error).message
+        assert.ok(!message.includes(value), 'the refusal echoed the value')
+        assert.match(message, /OUTBOX_ACCEPT_SECRETS/)
+        assert.match(message, /openssl rand -base64 48/)
+        return true
+      },
+    )
+  }
+})
+
+test('an unset signing secret is a refusal to boot, never a service that signs with nothing', () => {
+  // `policy` was found running with this variable UNSET — measured at zero characters — while its
+  // /livez stayed green. An empty value must reach `required`, not the shape guard, so the message
+  // names the variable rather than describing an alphabet.
+  assert.throws(
+    () => loadEnv({ ...BASE, OUTBOX_SIGNING_SECRET: undefined }),
+    /OUTBOX_SIGNING_SECRET is required/,
+  )
+  assert.throws(() => loadEnv({ ...BASE, OUTBOX_SIGNING_SECRET: '   ' }), /OUTBOX_SIGNING_SECRET is required/)
+})
+
+test('a generated secret is accepted, in either alphabet, alone or as a rotation window', () => {
+  const outgoing = randomBytes(48).toString('base64')
+  const incoming = randomBytes(48).toString('base64')
+  assert.doesNotThrow(() => loadEnv({ ...BASE, OUTBOX_SIGNING_SECRET: outgoing }))
+  assert.doesNotThrow(() => loadEnv({ ...BASE, OUTBOX_SIGNING_SECRET: randomBytes(32).toString('hex') }))
+
+  // The rotation window this variable exists for: both keys accepted, newest first, while
+  // producers cut over one service at a time.
+  const rotating = loadEnv({ ...BASE, OUTBOX_ACCEPT_SECRETS: `${incoming},${outgoing}` })
+  assert.deepEqual(rotating.acceptSecrets, [incoming, outgoing])
+
+  // Unset still means "just the signing key", so a deploy that ignores the variable is unchanged.
+  assert.deepEqual(loadEnv({ ...BASE, OUTBOX_SIGNING_SECRET: outgoing }).acceptSecrets, [outgoing])
+
+  // And a repeated entry is still refused: "which key verified this" is what tells an operator a
+  // rotation has finished, and a duplicate makes that unanswerable.
+  assert.throws(
+    () => loadEnv({ ...BASE, OUTBOX_ACCEPT_SECRETS: `${incoming},${incoming}` }),
+    /lists the same secret twice/,
+  )
 })
 
 test('purchases are priced in USD and settled in EMBER, neither configurable', () => {
@@ -176,7 +253,7 @@ test('identityUrl derives from the issuer, and IDENTITY_URL overrides it', () =>
 
 test('either retired token being set is reported rather than obeyed', () => {
   assert.equal(loadEnv(BASE).legacyServiceTokenPresent, false)
-  const legacyLedger = loadEnv({ ...BASE, BILLING_LEDGER_TOKEN: 'T7uW2kM9pX4bV6nQ1sD8jH3fG5rL0yZa' })
+  const legacyLedger = loadEnv({ ...BASE, BILLING_LEDGER_TOKEN: 'retired-ignored-see-src-env-ts' })
   assert.equal(legacyLedger.legacyServiceTokenPresent, true)
   // And it confers nothing: setting it must not make the service look configured.
   assert.equal(legacyLedger.identityCredential, null)

@@ -18,6 +18,7 @@
 import { hostname } from 'node:os'
 import type { LedgerAssetCode } from '@cloudsforge/contracts-money'
 import type { IssuableAssetCode } from '@cloudsforge/contracts-chain'
+import { assertGeneratedSecret, assertGeneratedSecretList } from '@cloudsforge/secrets'
 
 /**
  * The service's own name. A constant rather than a variable: it is a property of the repository,
@@ -57,10 +58,20 @@ function required(source: Source, name: string): string {
 /**
  * A comma-separated secret list, for a receiver that must accept more than one key at a time.
  *
- * Every entry is held to the same bar as a single secret: a rotation that admits a placeholder or
- * a short key has widened the credential rather than replaced it. A duplicate is refused because
- * "which key verified this" is the answer that tells an operator a rotation has finished and the
- * old key can be dropped, and a repeated entry makes it ambiguous.
+ * Every entry is held to the same bar as a single secret, and since micro-org #142 that bar is
+ * `assertGeneratedSecret` rather than a deny-list plus a 24-character floor. A LIST IS NOT A PLACE
+ * WHERE THE RULE RELAXES: this variable exists to give a rotation an overlap window, and the
+ * OUTGOING key is the one an attacker already has if it leaked. "Just for the drain" is exactly
+ * how a placeholder survives a rotation that was supposed to remove it — and this list is the
+ * accept side of the very key that sat in a public compose file on 44 live containers, so a
+ * forged delivery to `POST /v1/events` is the concrete thing being prevented.
+ *
+ * A duplicate is refused because "which key verified this" is the answer that tells an operator a
+ * rotation has finished and the old key can be dropped, and a repeated entry makes it ambiguous.
+ * That check is local because it is a property of the LIST rather than of any entry.
+ *
+ * The index is named in the refusal and the entry is not: an operator with the file open can count
+ * commas, and a log collector must not be handed the value.
  */
 export function parseSecretList(raw: string, name: string): readonly string[] {
   const entries = raw
@@ -68,14 +79,7 @@ export function parseSecretList(raw: string, name: string): readonly string[] {
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0)
   if (entries.length === 0) throw new EnvError(`${name} is required — at least one secret`)
-  for (const entry of entries) {
-    if (PLACEHOLDERS.has(entry.toLowerCase())) {
-      throw new EnvError(`${name} contains a known placeholder — generate real secrets`)
-    }
-    if (entry.length < 24) {
-      throw new EnvError(`${name} entries must each be at least 24 characters`)
-    }
-  }
+  assertGeneratedSecretList(name, entries)
   if (new Set(entries).size !== entries.length) {
     throw new EnvError(`${name} lists the same secret twice`)
   }
@@ -92,6 +96,33 @@ function requiredSecret(source: Source, name: string, minLength = 24): string {
   if (value.length < minLength) {
     throw new EnvError(`${name} must be at least ${minLength} characters (got ${value.length})`)
   }
+  return value
+}
+
+/**
+ * The estate's shared event-bus HMAC key, held to a shape rather than to a deny-list.
+ *
+ * `requiredSecret` above cannot be the guard for this one. It refuses a fixed list of exact
+ * strings and anything under 24 characters, and the value that sat on 54 lines of a PUBLIC compose
+ * file — `estate-only-outbox-secret-00000000000000` — was on no list and was 40 characters, so it
+ * passed every service in the estate (micro-org #142) and was live on 44 containers across both
+ * networks. A check that could not fail read as the absence of a problem. It matters here more
+ * than most: this service posts to the ledger, so a forgeable event signature is a forgeable
+ * movement of somebody's money.
+ *
+ * `assertGeneratedSecret` asserts what a placeholder cannot have: the base64 or hex alphabet (no
+ * hyphens — every placeholder this estate wrote had one), 32 decoded BYTES rather than 24
+ * keystrokes, and a measured Shannon entropy floor. It has no NODE_ENV exemption and no escape
+ * hatch, so CI generates a real value per run rather than being let through.
+ *
+ * `required` rather than `requiredSecret`, deliberately: the weaker checks are a strict subset of
+ * the stronger ones, and running them first would answer a 40-character placeholder with "must be
+ * at least 24 characters" — a message that is true, useless, and points the operator at the wrong
+ * property.
+ */
+function requiredSigningSecret(source: Source, name: string): string {
+  const value = required(source, name)
+  assertGeneratedSecret(name, value)
   return value
 }
 
@@ -265,7 +296,7 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
   }
 
   // Read before the object literal because the accept list falls back to it.
-  const outboxSigningSecret = requiredSecret(source, 'OUTBOX_SIGNING_SECRET')
+  const outboxSigningSecret = requiredSigningSecret(source, 'OUTBOX_SIGNING_SECRET')
 
   const ledgerBaseUrl = required(source, 'BILLING_LEDGER_URL')
   if (!/^https?:\/\//i.test(ledgerBaseUrl)) {

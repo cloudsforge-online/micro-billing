@@ -26,9 +26,16 @@ jobs:
       port: 4000
       # The image startup smoke test boots the real service, and `env.ts` validates its
       # configuration at import — so the container needs the variables it declares, not just a
-      # database, or it exits before it serves /livez. These are CI-only NON-secrets: throwaway
-      # values that only have to clear a length check, and URLs that are never dialled because
-      # /livez needs no upstream. Never a real credential.
+      # database, or it exits before it serves /livez. The URLs are CI-only NON-secrets, never
+      # dialled because /livez needs no upstream, and `BILLING_LEDGER_TOKEN` is a retired variable
+      # env.ts reads only to report that it is set and ignored. Never a real credential.
+      #
+      # `OUTBOX_SIGNING_SECRET=@generate` asks service-ci.yml for a fresh `openssl rand -base64 48`
+      # per run. It used to be `ci-only-not-a-real-secret-000000000000`, described here as a
+      # throwaway that only had to clear a length check — and that description was the defect. A
+      # value of exactly that shape sat in a PUBLIC compose file and cleared every guard in the
+      # estate, live on 44 containers (micro-org #142). The boot guard now checks SHAPE and has no
+      # CI exemption, so CI holds a real generated secret rather than a string claiming to be one.
       smoke-env: |
         IDENTITY_JWKS_URL=http://127.0.0.1:4001/.well-known/jwks.json
         IDENTITY_ISSUER=http://127.0.0.1:4001
@@ -38,7 +45,7 @@ jobs:
         # dialled here — /livez needs no upstream. micro-deploy needs the real one; see the note in
         # `src/env.ts`.
         BILLING_PRICING_URL=http://127.0.0.1:4009
-        OUTBOX_SIGNING_SECRET=ci-only-not-a-real-secret-000000000000
+        OUTBOX_SIGNING_SECRET=@generate
         BILLING_LEDGER_TOKEN=ci-only-not-a-real-token-0000000000000
     secrets:
       # @cloudsforge/* is resolved by link:../runtime and link:../contracts, so CI checks out

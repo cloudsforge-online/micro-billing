@@ -257,24 +257,30 @@ skipped.
 
 ## Known gaps
 
-* **`.env.example` and `src/env.ts` disagree on the secret length.** The file says
-  `OUTBOX_SIGNING_SECRET` must be "at least 32 random characters" (`.env.example:23-24`);
-  `requiredSecret` is called without a length override, so the enforced minimum is the default **24**
-  (`src/env.ts:160`, default at `:57`). The comment is the stricter of the two, so nothing insecure
-  follows — but a 26-character secret satisfies the code and contradicts the file. **Reported, not
-  edited**, per this change's remit. `micro-ledger`'s `.env.example` carries the identical wording
-  and the identical mismatch.
-* **The example secret would boot.** `OUTBOX_SIGNING_SECRET=CHANGE_ME_TO_32_RANDOM_CHARACTERS` is 33
-  characters and is not in the `PLACEHOLDERS` set (`src/env.ts:38-47`), so a deployment that copies
-  `.env.example` unchanged starts successfully with a secret that is in the public repository. The
-  placeholder guard catches `changeme` and `CHANGE_ME` but not this spelling. `micro-ledger` and
-  `micro-billing` both ship it; `micro-indexer` and `micro-mint` ship the variable **empty**, which
-  fails closed and is the better pattern.
-* **`.env.test` and `.env.test.example` are committed with real-looking values** —
-  `OUTBOX_SIGNING_SECRET='K2sN4vQ8xR1wB6tY9zL3mF7hC5jD0pA4'` and a matching
-  `BILLING_IDENTITY_CREDENTIAL`. They are test-only and the database they name is a local `_test`, so
-  nothing is disclosed; but they are indistinguishable from real credentials to a scanner and to a
-  reader.
+* ~~**`.env.example` and `src/env.ts` disagree on the secret length.**~~ **CLOSED**, and the
+  disagreement turned out to be the smaller half of the problem. Both numbers counted KEYSTROKES,
+  and keystrokes are not the unit an HMAC key is measured in. `OUTBOX_SIGNING_SECRET` now goes
+  through `requiredSigningSecret` → `@cloudsforge/secrets`, which demands the base64 or hex
+  alphabet, **32 decoded bytes**, and a measured entropy floor. `.env.example` describes that
+  check, so there is one rule and one description of it (micro-org #142).
+* ~~**The example secret would boot.**~~ **CLOSED, and it was worse than this entry said.** The
+  bullet had the mechanism exactly right — a value not on the deny-list clears a guard that only
+  knows spellings — but scoped it to a file nobody deploys. The same hole was live:
+  `estate-only-outbox-secret-00000000000000`, 40 characters, on 54 lines of a PUBLIC compose file
+  and accepted by **44 containers across both networks**. A deny-list of exact strings cannot work,
+  because the next placeholder somebody writes is by definition not on it. The guard is now
+  shape-based, so `CHANGE_ME_run_openssl_rand_base64_48` is refused for the reason every
+  hand-written value is: it is not a generated secret. Shipping the variable **empty** is no longer
+  "the better pattern" either — an empty value and a placeholder are both refusals now, and a
+  visible `CHANGE_ME` tells the operator what to do.
+* ~~**`.env.test` and `.env.test.example` are committed with real-looking values.**~~ **CLOSED.**
+  `OUTBOX_SIGNING_SECRET` now runs `openssl rand -base64 48` at source time rather than carrying a
+  literal: the old fixture was 32 characters but only 24 BYTES, so the current guard refuses it —
+  and a fixture exempt from the rule it exercises is precisely how the estate placeholder passed
+  every test. The retired `BILLING_LEDGER_TOKEN` beside it kept its random-looking literal for no
+  reason at all — it is read only so boot can log that it is IGNORED — and now spells out what it
+  is, because "indistinguishable from a real credential to a scanner" was the accurate half of
+  this entry.
 * **`/metrics` is unauthenticated** (`src/server.ts:356`).
 * **No path versioning.** This service serves `/purchases`, not `/v1/purchases`
   (`docs/ecosystem/18-build-status.md` §3.3d, item 3).

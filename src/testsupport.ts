@@ -21,7 +21,7 @@
  * Not a test file itself — it is excluded from the build and contains no `test()` call.
  */
 
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import postgres from 'postgres'
 import { migrate, type Sql as DbSql } from '@cloudsforge/db'
 import { chainSpec, coinAmountForUsdCents } from '@cloudsforge/contracts-chain'
@@ -136,10 +136,14 @@ export const BOB = `user:${BOB_ID}`
 /**
  * The secret the test server accepts event deliveries under.
  *
- * At least 24 characters, because `parseSecretList` refuses anything shorter and a fixture that
- * would be rejected by the real `loadEnv` is a fixture testing a configuration no deploy can have.
+ * GENERATED per run, because a fixture that would be rejected by the real `loadEnv` is a fixture
+ * testing a configuration no deploy can have. The bar it has to clear moved: `parseSecretList` now
+ * holds every entry to `assertGeneratedSecret`, so the written literal that used to sit here —
+ * 34 characters, hyphenated, and therefore not base64 — would be refused at boot even though it
+ * cleared the old 24-character floor. That gap between "passes the fixture" and "passes the
+ * deploy" is exactly what micro-org #142 lived in.
  */
-export const EVENT_SECRET = 'test-event-secret-0123456789abcdef'
+export const EVENT_SECRET = randomBytes(48).toString('base64')
 
 /**
  * An envelope signed the way identity's relay signs it, and the reason this helper exists at all.
