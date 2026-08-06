@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { RATE_SCALE, WEI_PER_SPARK } from '@cloudsforge/contracts-chain'
 import { RateUnavailableError, httpPricingClient } from './pricingclient.ts'
 
-/** EMBER's real administered price: 0.25 USD, `pricing/src/migrations.ts:185`. */
+/** EMBER's real administered price: 0.25 USD, `pricing/src/migrations.ts`. */
 const QUARTER = '250000'
 
 function clientReturning(rate: unknown, status = 200) {
@@ -45,7 +45,7 @@ test('a usable rate converts a dollar price into wei', async () => {
 
 test('AN UNUSABLE RATE IS A 200, AND IS STILL REFUSED', async () => {
   // The defect shape this test exists for: pricing answers 200 with `usable: false` and a reason,
-  // deliberately (`pricing/src/server.ts:321-329`). A client that checked only the status code
+  // deliberately (`pricing/src/server.ts`). A client that checked only the status code
   // would read a refusal as a price — the same mistake as the wallet that read an unknown receipt
   // as a successful payment. The FLAG is what is checked.
   const client = clientReturning({

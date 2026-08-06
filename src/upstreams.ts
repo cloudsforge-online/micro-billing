@@ -7,7 +7,7 @@
  * is wiring no test can reach. `index.ts` opens a pool, asserts a schema and calls `listen()`;
  * importing it from a test starts a server. So the line that was wrong —
  *
- *     token: () => env.ledgerToken        // index.ts:114, for months
+ *     token: () => env.ledgerToken        // index.ts, for months
  *
  * — was structurally untestable. Its comment even said the function was async by contract "so the
  * ten-minute service token identity issues can be refreshed here without anything else in the
@@ -15,7 +15,7 @@
  *
  * ── THE TEN-MINUTE CLIFF ───────────────────────────────────────────────────────────────────────
  *
- * A service token expires in 600 seconds (identity/src/tokens.ts:28). This service read one once
+ * A service token expires in 600 seconds (identity/src/tokens.ts). This service read one once
  * at boot and nothing re-minted it — nothing could, because minting required the `admin` role. Ten
  * minutes into every deployment, every posting to the ledger failed. No test here could see it: a
  * test mints a token and uses it within seconds.
@@ -28,7 +28,7 @@
  *
  * `BILLING_LEDGER_TOKEN` and `BILLING_ADMIN_API_TOKEN` were two secrets because they carry
  * different scopes: the ledger needs `ledger:post`, admin-api exact-matches `admin:read`
- * (`adminapi.ts:51`, enforced at `admin-api/src/server.ts:481`). That separation is AD-05 and is
+ * (`adminapi.ts`, enforced at `admin-api/src/server.ts`). That separation is AD-05 and is
  * worth keeping — a process whose environment leaks should surrender the narrowest thing possible.
  *
  * It no longer needs two SECRETS to keep it. Identity reads the service off the credential ROW and

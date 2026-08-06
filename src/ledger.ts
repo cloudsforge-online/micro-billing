@@ -242,22 +242,22 @@ function parseBody(text: string): LedgerErrorBody {
  *
  * Platform fee revenue **out**, the engagement treasury **in**. Both accounts are the platform's
  * own, so nothing here touches a user, and the entry is the ordinary `transfer` kind — the same
- * one `micro-admin-api` posts for `engagement.transfer` (admin-api/src/actions.ts:341), because
+ * one `micro-admin-api` posts for `engagement.transfer` (admin-api/src/actions.ts), because
  * moving the platform's money between two of the platform's own accounts is what both are.
  *
  * ── THE ACCOUNT TYPES ARE NOT A CHOICE, AND ONE OF THEM HAS ALREADY BITTEN THE ESTATE ──────────
  *
  * The ledger keys an account on `(subject, asset_code, purpose)` and REFUSES an entry that names
- * an existing account with a different `type` (`ledger/src/accounts.ts:125`, `AccountConflictError`
+ * an existing account with a different `type` (`ledger/src/accounts.ts`, `AccountConflictError`
  * — "a wrong balance that still balances"). So both spellings below are copied from the services
  * that already write these two accounts, not chosen:
  *
  *   * `(platform, SHARD, fees)` is **revenue**, exactly as `purchasePostings` below already
- *     credits it, and as `micro-market` (market/src/ledgerclient.ts:123), `micro-trade`
- *     (trade/src/ledgerclient.ts:185), `micro-wallet` and `micro-mint` all spell it. Debiting a
+ *     credits it, and as `micro-market` (market/src/ledgerclient.ts), `micro-trade`
+ *     (trade/src/ledgerclient.ts), `micro-wallet` and `micro-mint` all spell it. Debiting a
  *     credit-normal account reduces it, which is what recycling revenue IS.
  *   * `(platform:engagement-treasury, SHARD, treasury)` is **equity**, exactly as admin-api's
- *     `engagement.transfer` debits it (admin-api/src/actions.ts:352-357) and as
+ *     `engagement.transfer` debits it (admin-api/src/actions.ts) and as
  *     `engagementAccount` in contracts-money spells the per-service accounts below it. Equity is
  *     NOT overdraft-exempt, which is the property that makes an unfunded treasury refuse a grant
  *     rather than go negative.

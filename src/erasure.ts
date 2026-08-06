@@ -25,9 +25,9 @@
  * |                    |                       | consumer buyer, so the transaction survives and the  |
  * |                    |                       | identity does not. `subject` AND `actor` both go;    |
  * |                    |                       | see the note on `actor` in migration 12.             |
- * |                    |                       | It is also SUMMED: `recycle.ts:184` reads            |
+ * |                    |                       | It is also SUMMED: `recycle.ts` reads            |
  * |                    |                       | `sum(amount) from purchases` as the fee recycle's    |
- * |                    |                       | gross, and `recycle.ts:246` reads `min(created_at)`  |
+ * |                    |                       | gross, and `recycle.ts` reads `min(created_at)`  |
  * |                    |                       | as the first period's boundary. Recycle rows for     |
  * |                    |                       | closed periods have already posted to the ledger, so |
  * |                    |                       | deleting a purchase would silently restate a period  |
@@ -36,7 +36,7 @@
  * |--------------------|-----------------------|-----------------------------------------------------|
  * | invoices           | retain, de-identified | Same basis, more plainly: an invoice is the document |
  * |                    |                       | the record-keeping obligation is actually ABOUT.     |
- * |                    |                       | Same summing argument — `recycle.ts:189` reads       |
+ * |                    |                       | Same summing argument — `recycle.ts` reads       |
  * |                    |                       | `sum(total) from invoices` into the same gross.      |
  * |                    |                       | `invoice_lines` cascade from it and carry no subject |
  * |                    |                       | of their own, so they are left exactly as they are.  |
@@ -92,12 +92,12 @@
  * |                    |                       | no subject column, so it does not appear in any      |
  * |                    |                       | survey of "tables storing a user reference" — but    |
  * |                    |                       | `response` is a verbatim copy of the purchase reply, |
- * |                    |                       | `subject` included (src/purchases.ts:402), so a full |
+ * |                    |                       | `subject` included (src/purchases.ts), so a full |
  * |                    |                       | second copy of the personal data sits in jsonb.      |
  * |                    |                       | De-identifying the purchase and leaving this would   |
  * |                    |                       | be a compliance report that is false in its own      |
  * |                    |                       | database. Rows are found through `resource_id`,      |
- * |                    |                       | which names the purchase (src/purchases.ts:303).     |
+ * |                    |                       | which names the purchase (src/purchases.ts).     |
  * |                    |                       | Deleting a claim makes a future retry of that key    |
  * |                    |                       | re-execute — harmless here, because the only client  |
  * |                    |                       | that could retry it is the account being deleted.    |
@@ -154,7 +154,7 @@ export interface ErasureCounts {
 /**
  * The two spellings of one person, and why both are matched.
  *
- * The event payload carries a BARE UUID (`identity/src/deletion.ts:113-125`). This service stores
+ * The event payload carries a BARE UUID (`identity/src/deletion.ts`). This service stores
  * the LEDGER SPELLING — `user:<uuid>`, built by `userSubject` from `@cloudsforge/contracts-money`
  * so that a grant and the ledger entry that paid for it name their holder identically
  * (`src/server.ts` POST /purchases). Matching only the ledger spelling would be right today and
@@ -174,7 +174,7 @@ export function subjectForms(userId: string): readonly string[] {
  * This pattern read `[1-5]` for the version and `[89ab]` for the variant — the
  * RFC 4122 shape for versions 1 to 5. **Every user id in this estate is a
  * UUIDv7.** 04-domain-model section 0 requires it ("All ids are UUIDv7,
- * time-ordered, so they index well and sort"), and `identity/src/ids.ts:33`
+ * time-ordered, so they index well and sort"), and `identity/src/ids.ts`
  * mints them.
  *
  * So this regex rejected every real erasure event. The handler answered 400, the

@@ -36,7 +36,7 @@ import { expiryFor, resolveTarget, type ProductRecord, type PriceRecord } from '
  *
  * A Spark is 10⁻⁶ EMBER — a display denomination of one asset, never a second asset code. The
  * distinction is not pedantry: the ledger's balancing invariant is enforced per asset code
- * (`ledger/src/migrations.ts:302-313`), so a second code for the same money would let its two
+ * (`ledger/src/migrations.ts`), so a second code for the same money would let its two
  * halves drift apart with nothing able to notice. Nothing in this service posts a Spark, and
  * `contracts-chain` greps its own source to keep the string out of the asset union entirely.
  *

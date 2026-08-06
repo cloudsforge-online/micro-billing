@@ -308,7 +308,7 @@ test('THE SUMS DO NOT MOVE: recycle gross is identical before and after', { skip
   const after = await sql<Array<{ gross: string; earliest: Date }>>`
     select coalesce(sum(amount), 0)::text as gross, min(created_at) as earliest from purchases
   `
-  // `recycle.ts:184` and `:246` read exactly these two. A closed period has already posted its
+  // `recycle.ts` and read exactly these two. A closed period has already posted its
   // entry to the ledger, so a change to either would restate money that has moved.
   assert.equal(after[0]?.gross, before[0]?.gross)
   assert.deepEqual(after[0]?.earliest, before[0]?.earliest)

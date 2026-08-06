@@ -14,7 +14,7 @@
  *   3. **Revocation.** So a refund removes what it paid for. There is no revocation column in the
  *      estate at all; a refunded purchase leaves its entitlement standing.
  *   4. **A service-readable API.** The estate's `GET /entitlements` is Bearer-only
- *      (`monetization.ts:32`, `preHandler: requireAuth`), so **no service can ask whether a user
+ *      (`monetization.ts`, `preHandler: requireAuth`), so **no service can ask whether a user
  *      owns anything** — a world server holding no user token has no way to find out that a world
  *      was bought. `internalListEntitlements` below is that missing API, and it is why `subject`
  *      is an `AccountSubject` rather than a bare user id.

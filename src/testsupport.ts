@@ -308,7 +308,7 @@ export function fakeLedger(): FakeLedger {
 /**
  * A pricing client that converts at a fixed, stated rate.
  *
- * The default is EMBER's real administered price — 0.25 USD, `pricing/src/migrations.ts:185` —
+ * The default is EMBER's real administered price — 0.25 USD, `pricing/src/migrations.ts` —
  * so a test's arithmetic is the arithmetic production will do, not a rounder number chosen to make
  * the assertions tidy. At 0.25 USD, $2.50 is exactly 10 EMBER.
  *

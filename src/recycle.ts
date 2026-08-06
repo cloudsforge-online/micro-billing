@@ -15,7 +15,7 @@
  * 21 closes with an open decision: "whether the fee recycle starts at 0% (pure mined funding
  * until revenue exists) — recommended, since it costs nothing to raise later through the action
  * that already requires approval." **Taken as recommended.** The rate lives in admin-api, whose
- * migration seeds it at 0 (admin-api/src/migrations.ts:442), and nothing in this repository has
+ * migration seeds it at 0 (admin-api/src/migrations.ts), and nothing in this repository has
  * an opinion about it or a default for it.
  *
  * The pipeline still RUNS at 0%. Every closed period gets a row recording the day's takings and

@@ -25,7 +25,7 @@
  * ── THE CEILING IS CHECKED AGAINST OURS, AND A MISMATCH STOPS THE RECYCLE ──────────────────────
  *
  * `GET /v1/engagement/policies` publishes `ceilings.feeRecycleBps` alongside the rate
- * (admin-api/src/server.ts:965-971). `FEE_RECYCLE_CEILING_BPS` below is billing's copy of the
+ * (admin-api/src/server.ts). `FEE_RECYCLE_CEILING_BPS` below is billing's copy of the
  * same number, and it is also a CHECK constraint in migration 10 — so the schema refuses a rate
  * above it whatever this file does.
  *
@@ -39,8 +39,8 @@
  *
  * ## Route, verified against the other side
  *
- * `GET /v1/engagement/policies` — `admin-api/src/server.ts:956`, guarded by `requireReader`
- * (`admin-api/src/server.ts:481`): a SERVICE token must hold the exact scope `admin:read`.
+ * `GET /v1/engagement/policies` — `admin-api/src/server.ts`, guarded by `requireReader`
+ * (`admin-api/src/server.ts`): a SERVICE token must hold the exact scope `admin:read`.
  * Admin-api matches scopes exactly, so `admin:*` will not do. The body carries `policies`,
  * `feeRecycle` (`{ recycleBps, lastChangeApprovalId, updatedAt, updatedBy }`) and `ceilings`.
  */
@@ -64,15 +64,15 @@ import type { LiveScope } from '@cloudsforge/contracts-auth'
  * DEPRECATED ones included — and identity will not mint a deprecated scope either. `LiveScope =
  * Exclude<Scope, DeprecatedScope>`, with `DeprecatedScope` computed FROM `SCOPES` by a conditional
  * type over the `deprecated` field rather than hand-listed, so it cannot drift from the registry
- * (`contracts/packages/auth/src/index.ts:507`). Reading a token stays wide — one may arrive
+ * (`contracts/packages/auth/src/index.ts`). Reading a token stays wide — one may arrive
  * carrying a scope that has since died — and demanding is narrow. This is demanding.
  */
 export const ADMIN_API_SCOPES: readonly LiveScope[] = Object.freeze(['admin:read'])
 
 /**
  * 2500 bps = 25%. Billing's copy of `engagement_fee_recycle_within_ceiling`
- * (admin-api/src/migrations.ts:451) and of `FEE_RECYCLE_CEILING_BPS`
- * (admin-api/src/engagement.ts:58). It is a CHECK in migration 10 as well, and
+ * (admin-api/src/migrations.ts) and of `FEE_RECYCLE_CEILING_BPS`
+ * (admin-api/src/engagement.ts). It is a CHECK in migration 10 as well, and
  * `recycle.test.ts` proves this constant against that constraint by writing ceiling-plus-one
  * through a raw connection and watching the database refuse it.
  */

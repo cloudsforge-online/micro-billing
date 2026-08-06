@@ -563,7 +563,7 @@ describe('feeRecyclePostings', () => {
 
     // `(platform, SHARD, fees)` is REVENUE. billing/src/ledger.ts's own purchasePostings credits
     // it as revenue, and so do market, trade, wallet and mint. The ledger throws
-    // `AccountConflictError` on a type mismatch (ledger/src/accounts.ts:125), so a service that
+    // `AccountConflictError` on a type mismatch (ledger/src/accounts.ts), so a service that
     // spelled this `expense` would have every entry refused in production while its own fake
     // ledger accepted them — which is exactly how the estate found the collision in micro-worlds.
     const fees = postings.find((p) => p.account.subject === 'platform')

@@ -201,7 +201,7 @@ export interface Env {
    * **The long-lived credential this service exchanges for short-lived tokens.**
    *
    * It replaces `BILLING_LEDGER_TOKEN` and `BILLING_ADMIN_API_TOKEN`, both of which were 600-second
-   * tokens read once at boot (identity/src/tokens.ts:28). Ten minutes into any deployment they
+   * tokens read once at boot (identity/src/tokens.ts). Ten minutes into any deployment they
    * expired and every posting to the ledger failed; nothing could re-mint them, because minting
    * requires the `admin` role. A credential is not a token: it confers nothing by itself, it is
    * revocable, and it survives a restart.

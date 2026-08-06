@@ -23,7 +23,7 @@
  * refusing is guessing at how much of their money to take.
  *
  * Note that `usable: false` is a 200 on the other side, with a `reason`
- * (`pricing/src/server.ts:321-329` — "a 404 would be a lie about the asset existing and a 503
+ * (`pricing/src/server.ts` — "a 404 would be a lie about the asset existing and a 503
  * would suggest retrying will help"). So a status check alone would read an unusable rate as a
  * usable one. **The flag is what is checked, not the status.** That is the same defect shape as
  * the wallet that read an unknown receipt as a successful payment.
@@ -40,7 +40,7 @@
  *
  * ── THE ADMINISTERED RATE IS NOT A MARKET PRICE, AND THAT IS FINE HERE ────────────────────────
  *
- * EMBER's rate is administered (`pricing/src/rates.ts:55`), because Hearth has no exchange
+ * EMBER's rate is administered (`pricing/src/rates.ts`), because Hearth has no exchange
  * listing. That is precisely why the CATALOGUE must not be stored in EMBER — an operator editing
  * the figure would silently restate every price. It is not a reason to avoid it at settlement:
  * at settlement it is doing the only job it can do, converting a stated dollar price into the
@@ -49,8 +49,8 @@
  *
  * ## Route, verified against the other side
  *
- * `GET /rates/:asset` — `pricing/src/server.ts:321`. **Unauthenticated**: the rate board is public
- * in this estate by design (`pricing/src/server.ts:9`), and the neighbouring `/admin/prices`
+ * `GET /rates/:asset` — `pricing/src/server.ts`. **Unauthenticated**: the rate board is public
+ * in this estate by design (`pricing/src/server.ts`), and the neighbouring `/admin/prices`
  * routes are the ones behind `requireAdminAuthority`. So this client presents no credential and
  * needs no service-token grant.
  *
@@ -78,7 +78,7 @@ export class RateUnavailableError extends Error {
  * **`BigInt('')` is `0n`**, and a rate of zero would make `coinAmountForUsdCents` throw rather
  * than silently produce a free purchase — but only by luck of that function's guard. The estate
  * has been bitten by this repeatedly, so the value is made unreachable rather than handled: the
- * pattern is required BEFORE `BigInt` is called, the way `market/src/money.ts:222-227` does it.
+ * pattern is required BEFORE `BigInt` is called, the way `market/src/money.ts` does it.
  * A missing field, an empty string, `null`, a JSON number, `'1e3'` and `'0x10'` all refuse here.
  */
 const SCALED_PATTERN = /^\d{1,78}$/

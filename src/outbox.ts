@@ -127,7 +127,7 @@ export function verifyEventSignature(body: string, secret: string, presented: st
  * **What arrives here is signed the CONTRACT'S way, not this file's, and that is a fact about
  * another repository rather than a preference.**
  *
- * The one producer this service subscribes to is identity, and `identity/src/outbox.ts:48` imports
+ * The one producer this service subscribes to is identity, and `identity/src/outbox.ts` imports
  * `signDelivery` from `@cloudsforge/contracts-events`: `cf-signature: t=<seconds>,v1=<hmac over
  * "<seconds>.<body>">`. Verifying inbound with the local `verifyEventSignature` above — which
  * expects `x-cloudsforge-signature: sha256=<hmac over body>` under a different header name — would

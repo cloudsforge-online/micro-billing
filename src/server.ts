@@ -8,7 +8,7 @@
  * **`GET /internal/entitlements/:userId` is the fourth defect, fixed.**
  *
  * The estate's entitlements route is `preHandler: requireAuth`
- * (`repos/forge-pay/services/pay/src/routes/monetization.ts:32`) and there is no other. A user's
+ * (`repos/forge-pay/services/pay/src/routes/monetization.ts`) and there is no other. A user's
  * browser can ask what they own; **nothing else in the estate can**. A world server holding a
  * purchase event has no way to confirm the buyer still owns the world, a game service cannot check
  * a season pass, and a refund cannot be enforced by anything downstream. That is a direct cause of

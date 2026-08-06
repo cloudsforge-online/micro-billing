@@ -157,7 +157,7 @@ lifecycle.addProbe(serviceTokenProbe(identityTokens))
 
 // Unauthenticated, unlike `ledger` and `adminApi`, so it is built here rather than in
 // `upstreams.ts` — that module exists for the service-token wiring and this peer has none. The
-// rate board is public by design (`pricing/src/server.ts:9`).
+// rate board is public by design (`pricing/src/server.ts`).
 const pricing = httpPricingClient({
   baseUrl: env.pricingBaseUrl,
   deadlineMs: env.pricingDeadlineMs,

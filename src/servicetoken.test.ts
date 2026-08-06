@@ -7,7 +7,7 @@
  *     const token = () => env.serviceToken        // src/index.ts, before this change
  *
  * A string read once at boot, from a token that expires in 600 seconds
- * (identity/src/tokens.ts:28), which nothing could re-mint because minting required the `admin`
+ * (identity/src/tokens.ts), which nothing could re-mint because minting required the `admin`
  * role. Every peer call in this service began failing ten minutes into every deployment.
  *
  * WHY THIS SUITE COULD NOT SEE IT, AND WHY THIS FILE IS SHAPED AS IT IS. Every other test here
@@ -54,7 +54,7 @@ const IDENTITY = 'http://identity:4000'
 const PEER = 'http://ledger:4000'
 const CREDENTIAL = 'cfsc_a-long-lived-credential-that-does-not-expire'
 
-/** identity/src/tokens.ts:28. Unchanged by this fix, and it must stay unchanged. */
+/** identity/src/tokens.ts. Unchanged by this fix, and it must stay unchanged. */
 const SERVICE_TTL_SECONDS = 600
 
 const T0 = Date.UTC(2026, 7, 3, 12, 0, 0)
@@ -297,7 +297,7 @@ test('the admin-api client gets its OWN narrow token, from the one credential', 
   clockAt(0)
 
   // BILLING_ADMIN_API_TOKEN was a second long-lived secret because admin-api exact-matches
-  // `admin:read` while the ledger needs `ledger:post` (adminapi.ts:51). Keeping the scopes apart is
+  // `admin:read` while the ledger needs `ledger:post` (adminapi.ts). Keeping the scopes apart is
   // AD-05 and is worth keeping. Keeping two SECRETS apart is not: identity reads the service off
   // the credential row and never off the request, so one credential mints both and the scope set
   // is a request parameter.

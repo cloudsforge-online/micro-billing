@@ -1,7 +1,7 @@
 /**
  * Run a purchase at most once per key.
  *
- * **The shape is the ledger's, which took it from `repos/forge-pay/services/pay/src/store.ts:153`
+ * **The shape is the ledger's, which took it from `repos/forge-pay/services/pay/src/store.ts`
  * — the best code in the existing estate.** What it gets right, and what is preserved here:
  *
  *   1. **The claim INSERT and the work share ONE transaction.** The stored response can therefore
