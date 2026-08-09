@@ -13,9 +13,16 @@ Design authority: [`ecosystem/03-repository-responsibilities.md`](https://github
 > `src/env.ts`, and the file says why: a shared connection string would make the ledger's constraint
 > triggers optional for anything holding it (`src/env.ts`). AD-06.
 
-> **There is no fiat path to configure.** `purchaseAsset` is the literal `'SHARD'`
-> (`src/env.ts`) — not a variable — because Shards are the platform's unit of account and are
-> funded by on-chain deposit only (`src/env.ts`).
+> **There is no fiat path to configure.** A purchase is *priced* in `priceAsset`, the literal
+> `'USD'` held as cents, and *settled* in `settlementAsset`, the literal `'EMBER'` — neither is a
+> variable (`src/env.ts`). USD never reaches a posting; it is the durable figure the price rows are
+> written in, because there is no market price for EMBER to make an EMBER price durable against.
+> What leaves the customer's balance is EMBER, converted at the rate `micro-pricing` serves.
+>
+> `purchaseAsset` is gone, and so is the `'SHARD'` it held. Shards sat outside the estate's central
+> guarantee — no balance may exist that the chain does not back — so settlement moved to an asset a
+> chain backs. `settlementAsset` is typed `IssuableAssetCode` rather than `LedgerAssetCode`, which
+> excludes retired assets at COMPILE time: putting `'SHARD'` back here does not build.
 
 ---
 
@@ -203,7 +210,10 @@ says `OUTBOX_SIGNING_SECRET` needs "at least 32 random characters" and the code 
 | `BILLING_IDEMPOTENCY_TTL_DAYS` | `30` | 1–3650. **Expiring a key early means the next replay of it buys the thing a second time**, so this must outlive every caller's retry horizon (`src/env.ts`) |
 | `BILLING_TEST_DATABASE_URL` | — | tests only; the name must contain `test`. Unset, every database-backed test **skips** |
 
-`purchaseAsset` is **not configurable**: it is the literal `'SHARD'` (`src/env.ts`).
+Neither asset is **configurable**: `priceAsset` is the literal `'USD'` and `settlementAsset` the
+literal `'EMBER'` (`src/env.ts`). The price rows in the database are denominated in one thing, so an
+environment variable that disagreed with them would find no active price and fail every purchase
+with "no active X price". `purchaseAsset` — which was the literal `'SHARD'` — no longer exists.
 
 ---
 
