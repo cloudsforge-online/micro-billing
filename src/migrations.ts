@@ -7,6 +7,17 @@
  *
  * **A released migration is immutable.** `@cloudsforge/db` checksums each one and refuses a run
  * where the text changed after it was applied. The fix for a wrong migration is a new migration.
+ * The checksum covers the COMMENTS too, so a released migration cannot even be annotated in
+ * place — which is why the two corrections below are recorded here, in the one part of this file
+ * no checksum sees, rather than beside the text they correct:
+ *
+ *   * **Migration 10 names three columns `*_shards`.** They were EMBER wei from the first row and
+ *     the values were always right; migration 13 renames them `*_wei` (micro-org#336). Read
+ *     migration 10's `gross_shards`/`refunded_shards`/`amount_shards` as the historical spelling
+ *     of columns that exist today under the corrected names.
+ *   * **Migration 9 seeds a `'SHARD'` price.** Migration 11 retires it in place and adds
+ *     `prices_no_new_shard`; `src/testsupport.ts` explains why the fixture replays the seed
+ *     through a substitution rather than a rewrite.
  *
  * ---------------------------------------------------------------------------------------------
  * **The entitlements table is the point of this service, and four of its columns are the reason
@@ -787,6 +798,72 @@ export const MIGRATIONS: readonly Migration[] = [
       create trigger payouts_erasure_final
         before update on payouts
         for each row execute function billing_erasure_is_final();
+    `,
+  },
+
+  {
+    version: 13,
+    name: 'fee_recycle_in_ember_wei',
+    up: `
+      -- ════════════════════════════════════════════════════════════════════════════════════════
+      -- THE FEE RECYCLE COUNTS EMBER WEI. MIGRATION 10 CALLED THEM SHARDS. micro-org#336.
+      --
+      -- ── NO FIGURE MOVES, AND THAT IS THE WHOLE SAFETY ARGUMENT ──────────────────────────────
+      --
+      -- These columns have always held the fee asset's minor units, and the fee asset is
+      -- 'env.settlementAsset' — EMBER, typed IssuableAssetCode, i.e. Exclude<AssetCode, 'SHARD'>,
+      -- so the retired spelling does not even compile at the only call site. The numbers were
+      -- always wei and were always right. The NAMES were wrong, and wrong by eighteen orders of
+      -- magnitude: a reader who takes 'gross_shards = 40000000000000000' at its word reads 4e16
+      -- Shards where the row means one Shard's worth of EMBER.
+      --
+      -- So this is a RENAME and not a conversion, and the two neighbouring migrations are the
+      -- proof that the distinction is load-bearing rather than pedantic:
+      --
+      --   * Migration 11 REFUSED to relabel a Shard price 'EMBER', at length, because those rows
+      --     really were Shard counts and an UPDATE touching only the text column would have moved
+      --     every price by eighteen orders of magnitude.
+      --   * micro-admin-api's migration 13 ('engagement-in-ember-wei', micro-org#226, merged
+      --     2026-08-10) renamed 'transfer_cap_shards'/'amount_shards' to '*_wei' AND multiplied
+      --     by 4e16, for the same reason: its numbers were Shard counts.
+      --
+      -- Ours are not. Applying either treatment here would be the scale change this migration
+      -- exists to not be.
+      --
+      -- ── ALTER ... RENAME, NOT A NEW COLUMN ──────────────────────────────────────────────────
+      --
+      -- Postgres stores the generated expression, the two column CHECKs and
+      -- 'engagement_fee_recycles_skipped_moves_nothing' as parse trees over attribute numbers, so
+      -- all four follow the rename with no DDL of their own. Dropping and re-adding a generated
+      -- column would instead RECOMPUTE every row's amount from a freshly written expression — and
+      -- a recomputed amount that differed by one wei from what the ledger was already told is
+      -- exactly the class of error 21 §7.4's pairing exists to make impossible. A rename cannot
+      -- produce it, because it touches no value.
+      --
+      -- ── AND NO HISTORICAL LEDGER METADATA IS REWRITTEN, BECAUSE NONE EXISTS ─────────────────
+      --
+      -- 'src/recycle.ts' writes 'grossShards'/'refundedShards' into the durable metadata of the
+      -- entry it posts, so the bad names could have reached the audit of record. Measured on the
+      -- live estate 2026-08-10, before this migration:
+      --
+      --   mainnet  billing.engagement_fee_recycles  0 rows (0 posted, 0 pending, 0 skipped)
+      --   testnet  billing.engagement_fee_recycles  0 rows
+      --   mainnet  ledger.journal_entries           70 entries, 0 with any metadata key matching
+      --                                             '%shard%', 0 with correlation_id like
+      --                                             'engagement-recycle%'
+      --   testnet  ledger.journal_entries            1 entry,  same, zero
+      --   mainnet  admin_api.engagement_fee_recycle  recycle_bps = 0, unchanged since seeding
+      --
+      -- Nothing to convert here and nothing to reconcile there. Had there been posted rows, the
+      -- disposition would still be the same for the METADATA: a journal entry is settled
+      -- append-only history and its metadata is part of what was recorded at the time, so it gets
+      -- corrected forwards by a new entry, never edited. See the note above the 'metadata' block
+      -- in 'src/recycle.ts'. This migration only ever touches billing's own working table.
+      -- ════════════════════════════════════════════════════════════════════════════════════════
+
+      alter table engagement_fee_recycles rename column gross_shards    to gross_wei;
+      alter table engagement_fee_recycles rename column refunded_shards to refunded_wei;
+      alter table engagement_fee_recycles rename column amount_shards   to amount_wei;
     `,
   },
 ]

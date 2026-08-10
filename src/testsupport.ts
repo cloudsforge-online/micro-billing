@@ -197,6 +197,16 @@ export interface RecordedEntry {
   readonly actor: string
   readonly reversesEntryId: string | null
   readonly postings: PostEntryRequest['postings']
+  /**
+   * The durable audit metadata, recorded because it is DURABLE.
+   *
+   * It was not captured until 2026-08-10, and that omission is how micro-org#336 happened: the
+   * recycle wrote `grossShards`/`refundedShards` into the permanent metadata of an EMBER entry
+   * and no test in this repository could see the keys, so nothing went red. A ledger entry is
+   * never edited — corrections are reversals — so a wrong key here is wrong for ever, which
+   * makes it exactly the kind of thing a fake has to expose.
+   */
+  readonly metadata: PostEntryRequest['metadata']
 }
 
 export interface FakeLedger extends LedgerClient {
@@ -281,6 +291,7 @@ export function fakeLedger(): FakeLedger {
         actor: request.actor,
         reversesEntryId: null,
         postings: request.postings,
+        metadata: request.metadata,
       }))
     },
 
@@ -294,6 +305,7 @@ export function fakeLedger(): FakeLedger {
         kind: 'reversal',
         idempotencyKey: request.idempotencyKey,
         actor: request.actor,
+        metadata: request.metadata,
         // A correction is a NEW entry that names the original, never an edit of it.
         reversesEntryId: entryId,
         postings: original.postings.map((posting) => ({
