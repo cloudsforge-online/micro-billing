@@ -18,7 +18,9 @@
  *         rate; an unreadable rate is a refusal, never a zero, because a recycle of 0 and a
  *         recycle that could not be read look identical in the ledger.
  *
- *   The arithmetic  floor, always, and never a Shard over the configured share. It is a
+ *   The arithmetic  floor, always, and never a wei over the configured share — a wei and not a
+ *         Shard, which is what this line said until 2026-08-10, because the recycle moves
+ *         `settlementAsset` and that is EMBER (src/env.ts, typed `IssuableAssetCode`). It is a
  *         GENERATED column, so this suite asserts what the DATABASE computed rather than what
  *         the handler thought.
  * ══════════════════════════════════════════════════════════════════════════════════════════════

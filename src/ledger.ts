@@ -252,15 +252,40 @@ function parseBody(text: string): LedgerErrorBody {
  * — "a wrong balance that still balances"). So both spellings below are copied from the services
  * that already write these two accounts, not chosen:
  *
- *   * `(platform, SHARD, fees)` is **revenue**, exactly as `purchasePostings` below already
+ *   * `(platform, EMBER, fees)` is **revenue**, exactly as `purchasePostings` below already
  *     credits it, and as `micro-market` (market/src/ledgerclient.ts), `micro-trade`
  *     (trade/src/ledgerclient.ts), `micro-wallet` and `micro-mint` all spell it. Debiting a
  *     credit-normal account reduces it, which is what recycling revenue IS.
- *   * `(platform:engagement-treasury, SHARD, treasury)` is **equity**, exactly as admin-api's
+ *   * `(platform:engagement-treasury, EMBER, treasury)` is **equity**, exactly as admin-api's
  *     `engagement.transfer` debits it (admin-api/src/actions.ts) and as
  *     `engagementAccount` in contracts-money spells the per-service accounts below it. Equity is
  *     NOT overdraft-exempt, which is the property that makes an unfunded treasury refuse a grant
  *     rather than go negative.
+ *
+ * ── THE ASSET IS EMBER, AND THIS PARAGRAPH SAID SHARD UNTIL 2026-08-10 ─────────────────────────
+ *
+ * Both triples above are written with the asset spelled out because the ledger's account key
+ * INCLUDES it, so getting it wrong here does not mislabel an account — it names a different one.
+ * The code was always right: the asset is `input.assetCode`, and the only caller (src/index.ts,
+ * the job deps) passes `env.settlementAsset`, which is `'EMBER'` typed `IssuableAssetCode`, i.e.
+ * `Exclude<AssetCode, 'SHARD'>`. Restoring the retired spelling there does not compile. Only the
+ * prose named a retired asset, and it named it in the one position where a reader would take it
+ * as the account's identity rather than an example.
+ *
+ * It is corrected now rather than earlier because until today the other end of
+ * `platform:engagement-treasury` disagreed with this one. `micro-admin-api`'s `engagement.transfer`
+ * posted both its legs `assetCode: 'SHARD'`; its migration 13 (`engagement-in-ember-wei`,
+ * micro-org#226, merged 2026-08-10) renamed `transfer_cap_shards`/`amount_shards` to
+ * `transfer_cap_wei`/`amount_wei`, converted them at 1 Shard = 4e16 wei, and now posts
+ * `ENGAGEMENT_ASSET: IssuableAssetCode = 'EMBER'`. So the two services fund and spend one account
+ * in one asset, and 21 §4's "an auditor reconstructs the entire programme from the ledger alone"
+ * is reconstructible in a single unit. Nothing had to be unwound: measured on live mainnet
+ * 2026-08-10, no ledger account whose subject matches `engagement` exists in any asset, and the
+ * only `platform*` accounts are `(platform, EMBER, treasury)` and `(platform, EMBER, payout_due)`.
+ *
+ * SHARD itself is retired but not extinct — 26,000 Shards across 14 accounts on mainnet, measured
+ * the same day — which is why `micro-ledger` still permits it on `transfer` and why a recycle that
+ * named it would have POSTED rather than raised. That is the trap, and the type is what closes it.
  *
  * The revenue side is not overdraft-exempt either (`ledger_assert_no_overdraft` exempts only
  * `clearing`, `suspense` and an explicit `overdraft_allowed`), and that is a feature here: a
