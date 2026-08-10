@@ -80,8 +80,83 @@ test('the recycled amount is the DATABASE’s arithmetic, and it floors', () => 
   // A generated column, so a handler cannot compute a different number from the one the row
   // claims. `div` truncates and both operands are non-negative, so the recycle is always at most
   // the configured share — the safe direction for a transfer out of revenue.
-  assert.match(statementsOf(sql), /amount_shards\s+numeric\(78, 0\)\s+generated always as/)
-  assert.match(statementsOf(sql), /div\(greatest\(gross_shards - refunded_shards, 0::numeric\) \* recycle_bps, 10000::numeric\)/)
+  //
+  // Asserted against migration 10 in its ORIGINAL spelling because a migration is immutable —
+  // `checksumOf` covers the text — and migration 13 renamed the three columns to `*_wei` without
+  // touching the expression, which Postgres carries across a rename by attribute number.
+  // `recycle.test.ts` asserts the renamed, live column, which is the one a query sees.
+  const ten = statementsOf(MIGRATIONS.find((m) => m.version === 10)?.up ?? '')
+  assert.match(ten, /amount_shards\s+numeric\(78, 0\)\s+generated always as/)
+  assert.match(ten, /div\(greatest\(gross_shards - refunded_shards, 0::numeric\) \* recycle_bps, 10000::numeric\)/)
+})
+
+/* ═══════════════════════════════ migration 13 — the recycle counts EMBER wei, micro-org#336 */
+
+test('the fee-recycle columns end up named for the unit they hold, and only by renaming', () => {
+  const thirteen = statementsOf(MIGRATIONS.find((m) => m.version === 13)?.up ?? '')
+
+  // Three renames, and nothing else. The values were always EMBER wei — `deps.assetCode` is
+  // `env.settlementAsset`, typed `IssuableAssetCode` — so no figure may move here.
+  for (const [from, to] of [
+    ['gross_shards', 'gross_wei'],
+    ['refunded_shards', 'refunded_wei'],
+    ['amount_shards', 'amount_wei'],
+  ]) {
+    assert.match(
+      thirteen,
+      new RegExp(`rename column ${from}\\s+to ${to}`),
+      `${from} is not renamed to ${to}`,
+    )
+  }
+
+  // No conversion, no recompute, no re-add. `amount_wei` is GENERATED: dropping and re-adding it
+  // would recompute every row's amount from a freshly written expression, and an amount that
+  // differed by one wei from what the ledger was already told is what 21 §7.4's pairing exists to
+  // make impossible. Contrast admin-api's migration 13, which DID multiply by 4e16 — because its
+  // numbers really were Shard counts and ours never were.
+  assert.equal(/update\s+engagement_fee_recycles/i.test(thirteen), false, 'migration 13 rewrites a row')
+  assert.equal(/drop\s+column/i.test(thirteen), false, 'migration 13 drops a column instead of renaming it')
+  assert.equal(/4\s*e\s*16|40000000000000000/i.test(thirteen), false, 'migration 13 applies a conversion factor')
+})
+
+test('no migration leaves a Shard-named column on the fee-recycle table', () => {
+  // The guard that fails if the name comes back. It walks the migrations in order and tracks what
+  // the columns are actually called, because the schema is the SUM of the migrations: asserting
+  // over the concatenated text would go red on migration 10's immutable history for ever, and
+  // asserting over migration 13 alone would miss a migration 14 that added `bonus_shards`.
+  let columns = new Set<string>()
+  for (const migration of MIGRATIONS) {
+    const statements = statementsOf(migration.up)
+    const table = /create table if not exists engagement_fee_recycles\s*\(([\s\S]*?)\n\s*\);/.exec(statements)
+    if (table) {
+      for (const line of table[1]!.split('\n')) {
+        const column = /^\s{0,10}([a-z_]+)\s+(numeric|text|integer|uuid|timestamptz)\b/.exec(line)
+        if (column) columns.add(column[1]!)
+      }
+    }
+    for (const [, from, to] of statements.matchAll(
+      /alter table engagement_fee_recycles rename column\s+([a-z_]+)\s+to\s+([a-z_]+)/g,
+    )) {
+      columns.delete(from!)
+      columns.add(to!)
+    }
+    for (const [, added] of statements.matchAll(
+      /alter table engagement_fee_recycles\s+add column(?: if not exists)?\s+([a-z_]+)/g,
+    )) {
+      columns.add(added!)
+    }
+  }
+
+  // The parse has to have found something, or this test passes by seeing nothing.
+  assert.ok(columns.has('recycle_bps'), 'the column walk found no table — the parse is broken')
+  assert.deepEqual(
+    [...columns].filter((c) => /shard/i.test(c)).sort(),
+    [],
+    'a fee-recycle column is named for the retired SHARD while holding EMBER wei — micro-org#336',
+  )
+  for (const expected of ['gross_wei', 'refunded_wei', 'amount_wei']) {
+    assert.ok(columns.has(expected), `${expected} is missing from the final schema`)
+  }
 })
 
 test('a recycle names its entry exactly when it posted one — 21 §7.4', () => {
