@@ -1,6 +1,6 @@
 {
   "name": "@cloudsforge/billing",
-  "version": "2.5.20",
+  "version": "2026.08.27",
   "private": true,
   "description": "Products, prices, purchases, subscriptions, usage, invoices and payouts — and entitlements that finally have a scope, an expiry, revocation and a service-readable API. Money moves in the ledger; billing holds no balance.",
   "license": "MIT",
