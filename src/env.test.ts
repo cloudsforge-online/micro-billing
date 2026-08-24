@@ -42,12 +42,18 @@ test('a missing variable names itself', () => {
   assert.throws(() => loadEnv({ ...BASE, BILLING_LEDGER_URL: undefined }), /BILLING_LEDGER_URL is required/)
 })
 
-test('THE LEDGER IS A URL, NOT A DATABASE: there is no second connection string', () => {
+test('THE LEDGER IS A URL, NOT A DATABASE: no connection string reaches another service', () => {
   // Rule 1, and AD-06. A shared connection string would make the ledger's constraint triggers
   // optional for anything holding it, which is the entire safety argument of that service.
+  //
+  // The list grew by one on the network consolidation: `databaseUrlTestnet` is BILLING'S OWN
+  // database on the other estate, which is the same service holding the same schema behind the
+  // same triggers. It is not a second service's store, and that is the distinction this test
+  // exists to police — so it is pinned by name rather than by count, and a third entry appearing
+  // still has to be justified here.
   const keys = Object.keys(loadEnv(BASE))
   const urls = keys.filter((key) => /database/i.test(key))
-  assert.deepEqual(urls, ['databaseUrl', 'databasePoolMax'])
+  assert.deepEqual(urls, ['databaseUrl', 'databaseUrlTestnet', 'databasePoolMax'])
   assert.match(loadEnv(BASE).ledgerBaseUrl, /^https?:\/\//)
 })
 
