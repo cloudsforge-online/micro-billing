@@ -7,6 +7,7 @@
  * is proving the new capability is the same capability, not a second, weaker one.
  */
 
+import { networkSql, type Sql as RuntimeSql } from '@cloudsforge/db'
 import { test, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import type { AddressInfo } from 'node:net'
@@ -83,7 +84,8 @@ before(async () => {
     logger: new Logger({ service: 'billing-test', level: 'fatal', sink: () => {} }),
     metrics,
     verifier,
-    sql: sql as unknown as Db,
+    sql: singleNetworkSql(sql),
+    singleNetwork: 'mainnet' as const,
     purchases: {
       sql: sql as unknown as Db,
       // A getter, so `beforeEach` can hand the routes a fresh ledger between cases without
@@ -510,3 +512,12 @@ test('an event with no uuid envelope id is 400', { skip }, async () => {
   const event = signedEvent('identity.user.deleted', { userId: ALICE_ID }, { id: 'not-a-uuid' })
   assert.equal((await post(event)).status, 400)
 })
+
+/**
+ * One handle, presented as the per-network selector the server now takes. The fixture runs against
+ * a single test database, so mainnet is the only configured network — which exercises the REFUSAL
+ * path for free: anything reaching for testnet throws rather than reusing this handle.
+ */
+function singleNetworkSql(db: unknown) {
+  return networkSql({ mainnet: db as RuntimeSql })
+}
